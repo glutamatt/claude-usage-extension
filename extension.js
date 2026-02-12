@@ -11,7 +11,17 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
 
+// Configuration constants
 const API_URL = 'https://api.anthropic.com/api/oauth/usage';
+const PANEL_PROGRESS_BAR_WIDTH = 50;
+const MENU_PROGRESS_BAR_WIDTH = 200;
+const MIN_REFRESH_INTERVAL = 10;
+const MAX_REFRESH_INTERVAL = 600;
+const DEFAULT_REFRESH_INTERVAL = 300;
+const USAGE_WARNING_THRESHOLD = 0.80;
+const MAX_RETRY_ATTEMPTS = 3;
+const RETRY_DELAYS = [5, 10, 20]; // seconds for each retry attempt
+const STALE_DATA_MULTIPLIER = 2; // Data is stale if older than 2x refresh interval
 
 const ClaudeUsageIndicator = GObject.registerClass(
 class ClaudeUsageIndicator extends PanelMenu.Button {
@@ -22,6 +32,14 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._settings = settings;
         this._openPreferences = openPreferences;
         this._session = new Soup.Session();
+
+        // State tracking for retry logic and notifications
+        this._retryAttempt = 0;
+        this._lastUpdateTime = null;
+        this._lastError = null;
+        this._highUsageNotified = { fiveHour: false, sevenDay: false };
+        this._consecutiveFailures = 0;
+        this._isLoading = false;
 
         // Create box for panel button
         this._box = new St.BoxLayout({
@@ -242,29 +260,63 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         const file = Gio.File.new_for_path(credentialsPath);
         file.load_contents_async(null, (file, result) => {
             try {
-                const [, contents] = file.load_contents_finish(result);
-                const decoder = new TextDecoder('utf-8');
-                const json = JSON.parse(decoder.decode(contents));
-                const token = json.claudeAiOauth?.accessToken;
+                const [success, contents] = file.load_contents_finish(result);
 
-                if (!token) {
-                    this._label.set_text('No token');
-                    this._fiveHourPercent.set_text('No credentials');
-                    this._sevenDayPercent.set_text('—');
+                if (!success) {
+                    this._handleCredentialsError('Credentials file not found');
+                    return;
+                }
+
+                const decoder = new TextDecoder('utf-8');
+                const contentString = decoder.decode(contents);
+
+                let json;
+                try {
+                    json = JSON.parse(contentString);
+                } catch (parseError) {
+                    console.error('Claude Usage: Invalid JSON in credentials file:', parseError.message);
+                    this._handleCredentialsError('Invalid credentials file');
+                    return;
+                }
+
+                const token = json?.claudeAiOauth?.accessToken;
+
+                if (!token || typeof token !== 'string' || token.trim() === '') {
+                    this._handleCredentialsError('No access token found');
                     return;
                 }
 
                 this._fetchUsage(token);
             } catch (e) {
                 console.error('Claude Usage: Failed to read credentials:', e.message);
-                this._label.set_text('No token');
-                this._fiveHourPercent.set_text('No credentials');
-                this._sevenDayPercent.set_text('—');
+                this._handleCredentialsError('Failed to read credentials');
             }
         });
     }
 
+    _handleCredentialsError(errorMessage) {
+        this._label.set_text('No token');
+        this._fiveHourPercent.set_text(errorMessage);
+        this._sevenDayPercent.set_text('—');
+
+        // Only show notification once per session for credential errors
+        if (!this._lastError || !this._lastError.includes('credentials')) {
+            this._showNotification(
+                'Claude Usage: Credentials Error',
+                `${errorMessage}. Please check ~/.claude/.credentials.json`
+            );
+        }
+
+        this._lastError = errorMessage;
+    }
+
     _fetchUsage(token) {
+        // Prevent multiple concurrent requests
+        if (this._isLoading) {
+            return;
+        }
+
+        this._isLoading = true;
         const message = Soup.Message.new('GET', API_URL);
         message.request_headers.append('Authorization', `Bearer ${token}`);
         message.request_headers.append('anthropic-beta', 'oauth-2025-04-20');
@@ -274,23 +326,152 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             GLib.PRIORITY_DEFAULT,
             null,
             (session, result) => {
+                this._isLoading = false;
+
                 try {
                     const bytes = session.send_and_read_finish(result);
 
-                    if (message.status_code !== 200) {
-                        this._label.set_text('Error');
-                        this._fiveHourPercent.set_text(`HTTP ${message.status_code}`);
+                    // Handle HTTP errors
+                    if (message.status_code === 401 || message.status_code === 403) {
+                        this._handleAuthError();
                         return;
                     }
 
-                    const decoder = new TextDecoder('utf-8');
-                    const data = JSON.parse(decoder.decode(bytes.get_data()));
+                    if (message.status_code !== 200) {
+                        this._handleHttpError(message.status_code);
+                        return;
+                    }
 
+                    // Parse response
+                    const decoder = new TextDecoder('utf-8');
+                    const responseText = decoder.decode(bytes.get_data());
+                    let data;
+
+                    try {
+                        data = JSON.parse(responseText);
+                    } catch (parseError) {
+                        console.error('Claude Usage: Failed to parse JSON:', parseError.message);
+                        this._handleError('Invalid API response format');
+                        return;
+                    }
+
+                    // Validate response structure
+                    if (!this._validateApiResponse(data)) {
+                        this._handleError('API returned unexpected data structure');
+                        return;
+                    }
+
+                    // Success - reset retry counter and update display
+                    this._retryAttempt = 0;
+                    this._consecutiveFailures = 0;
+                    this._lastError = null;
+                    this._lastUpdateTime = Date.now();
                     this._updateDisplay(data);
+
                 } catch (e) {
-                    console.error('Claude Usage: Failed to fetch usage:', e.message);
-                    this._label.set_text('Error');
+                    console.error('Claude Usage: Network error:', e.message);
+                    this._handleNetworkError(e.message);
                 }
+            }
+        );
+    }
+
+    _validateApiResponse(data) {
+        // Validate that response has expected structure
+        if (!data || typeof data !== 'object') {
+            return false;
+        }
+
+        // Check for required fields
+        if (!data.five_hour || !data.seven_day) {
+            return false;
+        }
+
+        // Validate utilization values
+        const fiveHourUtil = data.five_hour.utilization;
+        const sevenDayUtil = data.seven_day.utilization;
+
+        if (typeof fiveHourUtil !== 'number' || typeof sevenDayUtil !== 'number') {
+            return false;
+        }
+
+        return true;
+    }
+
+    _handleAuthError() {
+        this._consecutiveFailures++;
+        this._lastError = 'Authentication failed';
+        this._label.set_text('Auth Error');
+        this._fiveHourPercent.set_text('Check credentials');
+        this._sevenDayPercent.set_text('—');
+
+        // Show notification for auth errors
+        this._showNotification(
+            'Claude Usage: Authentication Failed',
+            'Please check your credentials at ~/.claude/.credentials.json'
+        );
+    }
+
+    _handleHttpError(statusCode) {
+        this._consecutiveFailures++;
+        this._lastError = `HTTP ${statusCode}`;
+
+        if (this._shouldRetry()) {
+            this._scheduleRetry();
+        } else {
+            this._label.set_text('Error');
+            this._fiveHourPercent.set_text(`HTTP ${statusCode}`);
+            this._sevenDayPercent.set_text('—');
+        }
+    }
+
+    _handleNetworkError(errorMessage) {
+        this._consecutiveFailures++;
+        this._lastError = errorMessage;
+
+        if (this._shouldRetry()) {
+            this._scheduleRetry();
+        } else {
+            this._label.set_text('Error');
+            this._fiveHourPercent.set_text('Network error');
+            this._sevenDayPercent.set_text('—');
+
+            if (this._consecutiveFailures >= MAX_RETRY_ATTEMPTS) {
+                this._showNotification(
+                    'Claude Usage: Connection Failed',
+                    'Unable to reach Claude API after multiple attempts'
+                );
+            }
+        }
+    }
+
+    _handleError(errorMessage) {
+        this._consecutiveFailures++;
+        this._lastError = errorMessage;
+        this._label.set_text('Error');
+        this._fiveHourPercent.set_text(errorMessage);
+        this._sevenDayPercent.set_text('—');
+    }
+
+    _shouldRetry() {
+        return this._retryAttempt < MAX_RETRY_ATTEMPTS;
+    }
+
+    _scheduleRetry() {
+        if (this._retryAttempt >= MAX_RETRY_ATTEMPTS) {
+            return;
+        }
+
+        const delay = RETRY_DELAYS[this._retryAttempt];
+        this._label.set_text(`Retry ${delay}s`);
+
+        GLib.timeout_add_seconds(
+            GLib.PRIORITY_DEFAULT,
+            delay,
+            () => {
+                this._retryAttempt++;
+                this._refreshUsage();
+                return GLib.SOURCE_REMOVE;
             }
         );
     }
@@ -325,19 +506,56 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 `Resets in ${this._formatResetTime(data.seven_day.resets_at)}`
             );
         }
+
+        // Check for high usage and send notifications
+        this._checkUsageWarnings(fiveHour, sevenDay);
+    }
+
+    _checkUsageWarnings(fiveHour, sevenDay) {
+        const fiveHourDecimal = fiveHour / 100;
+        const sevenDayDecimal = sevenDay / 100;
+
+        // Check 5-hour usage threshold
+        if (fiveHourDecimal >= USAGE_WARNING_THRESHOLD && !this._highUsageNotified.fiveHour) {
+            this._showNotification(
+                'Claude Usage Warning: 5-Hour Limit',
+                `You've used ${fiveHour.toFixed(1)}% of your 5-hour limit`
+            );
+            this._highUsageNotified.fiveHour = true;
+        } else if (fiveHourDecimal < USAGE_WARNING_THRESHOLD) {
+            // Reset notification flag when usage drops below threshold
+            this._highUsageNotified.fiveHour = false;
+        }
+
+        // Check 7-day usage threshold
+        if (sevenDayDecimal >= USAGE_WARNING_THRESHOLD && !this._highUsageNotified.sevenDay) {
+            this._showNotification(
+                'Claude Usage Warning: 7-Day Limit',
+                `You've used ${sevenDay.toFixed(1)}% of your 7-day limit`
+            );
+            this._highUsageNotified.sevenDay = true;
+        } else if (sevenDayDecimal < USAGE_WARNING_THRESHOLD) {
+            // Reset notification flag when usage drops below threshold
+            this._highUsageNotified.sevenDay = false;
+        }
+    }
+
+    _showNotification(title, message) {
+        try {
+            // Use GNOME Shell's notification system
+            Main.notify(title, message);
+        } catch (e) {
+            console.error('Claude Usage: Failed to show notification:', e.message);
+        }
     }
 
     _updatePanelProgressBar(usage) {
-        // Panel progress bar background is 50px wide
-        const maxWidth = 50;
-        const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * maxWidth);
+        const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * PANEL_PROGRESS_BAR_WIDTH);
         this._panelProgressBar.set_width(width);
     }
 
     _updateProgressBar(progressBar, usage) {
-        // Menu progress bar background is 200px wide
-        const maxWidth = 200;
-        const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * maxWidth);
+        const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * MENU_PROGRESS_BAR_WIDTH);
         progressBar.set_width(width);
 
         // Update color class
@@ -385,14 +603,26 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
 
     destroy() {
         this._stopTimer();
+
+        // Clean up session
         if (this._session) {
             this._session.abort();
             this._session = null;
         }
+
+        // Clean up settings connection
         if (this._settingsChangedId) {
             this._settings.disconnect(this._settingsChangedId);
             this._settingsChangedId = null;
         }
+
+        // Reset state
+        this._retryAttempt = 0;
+        this._lastUpdateTime = null;
+        this._lastError = null;
+        this._highUsageNotified = null;
+        this._isLoading = false;
+
         super.destroy();
     }
 });
