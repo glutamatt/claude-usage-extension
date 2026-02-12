@@ -40,6 +40,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._highUsageNotified = { fiveHour: false, sevenDay: false };
         this._consecutiveFailures = 0;
         this._isLoading = false;
+        this._usageHistory = [];
 
         // Create box for panel button
         this._box = new St.BoxLayout({
@@ -479,32 +480,92 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     _updateDisplay(data) {
         const fiveHour = data.five_hour?.utilization ?? 0;
         const sevenDay = data.seven_day?.utilization ?? 0;
+        const now = Date.now();
 
-        // Update panel label with 5-hour usage (text mode)
-        this._label.set_text(`${Math.round(fiveHour)}%`);
+        // Track usage history for ETA computation
+        this._usageHistory.push({ timestamp: now, fiveHour, sevenDay });
+        if (this._usageHistory.length > 10) this._usageHistory.shift();
 
-        // Update panel progress bar (bar mode)
-        this._updatePanelProgressBar(fiveHour);
+        // Compute ETA to 100% for each metric (using oldest history point for stability)
+        let fiveHourEtaMs = null;
+        let sevenDayEtaMs = null;
+        let fiveHourWillHit = false;
+        let sevenDayWillHit = false;
 
-        // Update 5-hour section
+        if (this._usageHistory.length >= 2) {
+            const oldest = this._usageHistory[0];
+            const dt = now - oldest.timestamp;
+
+            const fhEta = this._computeEtaMs(fiveHour, oldest.fiveHour, dt);
+            if (fhEta !== null && data.five_hour?.resets_at) {
+                fiveHourEtaMs = fhEta;
+                const resetMs = new Date(data.five_hour.resets_at) - now;
+                fiveHourWillHit = resetMs > 0 && fhEta < resetMs;
+            }
+
+            const sdEta = this._computeEtaMs(sevenDay, oldest.sevenDay, dt);
+            if (sdEta !== null && data.seven_day?.resets_at) {
+                sevenDayEtaMs = sdEta;
+                const resetMs = new Date(data.seven_day.resets_at) - now;
+                sevenDayWillHit = resetMs > 0 && sdEta < resetMs;
+            }
+        }
+
+        // Panel: show the most concerning metric (will-hit-limit scores higher)
+        const fiveHourScore = fiveHour + (fiveHourWillHit ? 100 : 0);
+        const sevenDayScore = sevenDay + (sevenDayWillHit ? 100 : 0);
+
+        let panelUsage, panelResetAt, panelWillHit;
+        if (fiveHourScore >= sevenDayScore) {
+            panelUsage = fiveHour;
+            panelResetAt = data.five_hour?.resets_at;
+            panelWillHit = fiveHourWillHit;
+        } else {
+            panelUsage = sevenDay;
+            panelResetAt = data.seven_day?.resets_at;
+            panelWillHit = sevenDayWillHit;
+        }
+
+        // Contextual panel label: show reset time when >=50% or approaching limit
+        const showTime = panelUsage >= 50 || panelWillHit;
+        const prefix = panelWillHit ? '\u25B2 ' : '';
+        const timeSuffix = showTime && panelResetAt
+            ? ` \u00B7 ${this._formatResetTime(panelResetAt)}`
+            : '';
+        this._label.set_text(`${prefix}${Math.round(panelUsage)}%${timeSuffix}`);
+
+        if (panelWillHit) {
+            this._label.add_style_class_name('claude-usage-label-warn');
+        } else {
+            this._label.remove_style_class_name('claude-usage-label-warn');
+        }
+
+        // Panel progress bar
+        this._updatePanelProgressBar(panelUsage);
+
+        // Popup: 5-hour section
         this._fiveHourPercent.set_text(`${fiveHour.toFixed(1)}%`);
         this._updateProgressBar(this._fiveHourProgressBar, fiveHour);
 
-        // Update 7-day section
+        // Popup: 7-day section
         this._sevenDayPercent.set_text(`${sevenDay.toFixed(1)}%`);
         this._updateProgressBar(this._sevenDayProgressBar, sevenDay);
 
-        // Update reset times
+        // Popup: reset times with ETA warnings
         if (data.five_hour?.resets_at) {
-            this._fiveHourResetLabel.set_text(
-                `Resets in ${this._formatResetTime(data.five_hour.resets_at)}`
-            );
+            let resetText = `Resets in ${this._formatResetTime(data.five_hour.resets_at)}`;
+            if (fiveHourWillHit && fiveHourEtaMs !== null) {
+                resetText += ` \u00B7 \u25B2 ~${this._formatDuration(fiveHourEtaMs)} to limit`;
+            }
+            this._fiveHourResetLabel.set_text(resetText);
         }
 
         if (data.seven_day?.resets_at) {
-            this._sevenDayResetLabel.set_text(
-                `Resets in ${this._formatResetTime(data.seven_day.resets_at)}`
-            );
+            let resetText = `Resets in ${this._formatResetTime(data.seven_day.resets_at)}`;
+            if (sevenDayWillHit && sevenDayEtaMs !== null) {
+                resetText += ` \u00B7 \u25B2 ~${this._formatDuration(sevenDayEtaMs)} to limit`;
+            }
+            this._sevenDayResetLabel.set_text(resetText);
         }
 
         // Check for high usage and send notifications
@@ -552,6 +613,21 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     _updatePanelProgressBar(usage) {
         const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * PANEL_PROGRESS_BAR_WIDTH);
         this._panelProgressBar.set_width(width);
+
+        this._panelProgressBar.remove_style_class_name('usage-low');
+        this._panelProgressBar.remove_style_class_name('usage-medium');
+        this._panelProgressBar.remove_style_class_name('usage-high');
+        this._panelProgressBar.remove_style_class_name('usage-critical');
+
+        if (usage >= 90) {
+            this._panelProgressBar.add_style_class_name('usage-critical');
+        } else if (usage >= 70) {
+            this._panelProgressBar.add_style_class_name('usage-high');
+        } else if (usage >= 40) {
+            this._panelProgressBar.add_style_class_name('usage-medium');
+        } else {
+            this._panelProgressBar.add_style_class_name('usage-low');
+        }
     }
 
     _updateProgressBar(progressBar, usage) {
@@ -575,29 +651,30 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         }
     }
 
+    _computeEtaMs(currentUsage, previousUsage, timeDeltaMs) {
+        if (timeDeltaMs <= 0) return null;
+        const usageDelta = currentUsage - previousUsage;
+        if (usageDelta <= 0) return null;
+        const remaining = 100 - currentUsage;
+        if (remaining <= 0) return 0;
+        return (remaining / usageDelta) * timeDeltaMs;
+    }
+
+    _formatDuration(ms) {
+        if (ms <= 0) return 'now';
+        const diffMins = Math.floor(ms / 60000);
+        const diffHours = Math.floor(diffMins / 60);
+        const diffDays = Math.floor(diffHours / 24);
+        if (diffDays > 0) return `${diffDays}d ${diffHours % 24}h`;
+        if (diffHours > 0) return `${diffHours}h ${diffMins % 60}m`;
+        return `${diffMins}m`;
+    }
+
     _formatResetTime(isoString) {
         try {
-            const resetDate = new Date(isoString);
-            const now = new Date();
-            const diffMs = resetDate - now;
-
-            if (diffMs < 0) {
-                return 'now';
-            }
-
-            const diffMins = Math.floor(diffMs / 60000);
-            const diffHours = Math.floor(diffMins / 60);
-            const diffDays = Math.floor(diffHours / 24);
-
-            if (diffDays > 0) {
-                return `${diffDays}d ${diffHours % 24}h`;
-            } else if (diffHours > 0) {
-                return `${diffHours}h ${diffMins % 60}m`;
-            } else {
-                return `${diffMins}m`;
-            }
+            return this._formatDuration(new Date(isoString) - new Date());
         } catch (e) {
-            return '—';
+            return '\u2014';
         }
     }
 
@@ -621,6 +698,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._lastUpdateTime = null;
         this._lastError = null;
         this._highUsageNotified = null;
+        this._usageHistory = null;
         this._isLoading = false;
 
         super.destroy();
