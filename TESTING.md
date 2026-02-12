@@ -9,6 +9,37 @@ Before testing:
 - Claude Code installed
 - Valid credentials at `~/.claude/.credentials.json`
 
+## Development Workflow
+
+### Reloading the Extension After Code Changes
+
+The reload method depends on your session type and the changes you made:
+
+**For Most Code Changes (Recommended):**
+```bash
+gnome-extensions disable claude-usage@haletran && gnome-extensions enable claude-usage@haletran
+```
+This works on both X11 and Wayland and handles most code updates without requiring a full restart.
+
+**When Full GNOME Shell Restart is Required:**
+
+You need to restart GNOME Shell for:
+- Changes to `metadata.json`
+- Schema changes (after running `glib-compile-schemas`)
+- Significant structural changes
+- Adding/removing imports
+
+Restart methods by session type:
+- **X11**: Press `Alt+F2`, type `r`, press Enter
+- **Wayland**: Log out and log back in (no quick reload available)
+
+**Check Your Session Type:**
+```bash
+echo $XDG_SESSION_TYPE
+```
+
+**Development Tip:** If you're on Wayland and need frequent restarts, consider temporarily switching to an X11 session during development for faster iteration.
+
 ## Installation for Testing
 
 ### Manual Installation
