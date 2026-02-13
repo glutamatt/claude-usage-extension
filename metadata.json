@@ -1,10 +1,10 @@
 {
   "name": "Claude Code Usage",
   "description": "Display Claude Code usage in the top panel. This extension uses anthropic.com services. This extension is not affiliated, funded, or in any way associated with Claude.",
-  "uuid": "claude-code-usage@haletran.com",
+  "uuid": "claude-usage@glutamatt",
   "shell-version": ["48", "49"],
   "url": "https://github.com/Haletran/claude-usage-extension",
-  "settings-schema": "org.gnome.shell.extensions.claude-code-usage",
+  "settings-schema": "org.gnome.shell.extensions.claude-usage",
   "donations": {
     "github": "Haletran"
   },
