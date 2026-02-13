@@ -149,14 +149,18 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         fiveHourBox.add_child(fiveHourHeader);
 
         // Progress bar for 5-hour
-        const fiveHourProgressBg = new St.Widget({
+        this._fiveHourProgressBg = new St.Widget({
             style_class: 'claude-progress-bg',
+            clip_to_allocation: true,
         });
         this._fiveHourProgressBar = new St.Widget({
             style_class: 'claude-progress-bar usage-low',
         });
-        fiveHourProgressBg.add_child(this._fiveHourProgressBar);
-        fiveHourBox.add_child(fiveHourProgressBg);
+        this._fiveHourProgressBg.add_child(this._fiveHourProgressBar);
+        this._fiveHourProgressBg.connect('notify::allocation', () => {
+            this._syncProgressBarToAllocation(this._fiveHourProgressBar);
+        });
+        fiveHourBox.add_child(this._fiveHourProgressBg);
 
         this._fiveHourResetLabel = new St.Label({
             text: 'Resets: ...',
@@ -200,14 +204,18 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         sevenDayBox.add_child(sevenDayHeader);
 
         // Progress bar for 7-day
-        const sevenDayProgressBg = new St.Widget({
+        this._sevenDayProgressBg = new St.Widget({
             style_class: 'claude-progress-bg',
+            clip_to_allocation: true,
         });
         this._sevenDayProgressBar = new St.Widget({
             style_class: 'claude-progress-bar usage-low',
         });
-        sevenDayProgressBg.add_child(this._sevenDayProgressBar);
-        sevenDayBox.add_child(sevenDayProgressBg);
+        this._sevenDayProgressBg.add_child(this._sevenDayProgressBar);
+        this._sevenDayProgressBg.connect('notify::allocation', () => {
+            this._syncProgressBarToAllocation(this._sevenDayProgressBar);
+        });
+        sevenDayBox.add_child(this._sevenDayProgressBg);
 
         this._sevenDayResetLabel = new St.Label({
             text: 'Resets: ...',
@@ -667,8 +675,8 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     }
 
     _updateProgressBar(progressBar, usage) {
-        const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * MENU_PROGRESS_BAR_WIDTH);
-        progressBar.set_width(width);
+        progressBar._usage = usage;
+        this._syncProgressBarToAllocation(progressBar);
 
         // Update color class
         progressBar.remove_style_class_name('usage-low');
@@ -685,6 +693,22 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         } else {
             progressBar.add_style_class_name('usage-low');
         }
+    }
+
+    _syncProgressBarToAllocation(progressBar) {
+        const usage = progressBar._usage;
+        if (usage === undefined) return;
+
+        const parent = progressBar.get_parent();
+        if (!parent) return;
+
+        let bgWidth = MENU_PROGRESS_BAR_WIDTH;
+        const alloc = parent.get_allocation_box();
+        const allocWidth = alloc.get_width();
+        if (allocWidth > 0) bgWidth = allocWidth;
+
+        const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * bgWidth);
+        progressBar.set_width(width);
     }
 
     _computePace(utilization, resetsAt, windowMs) {
