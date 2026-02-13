@@ -164,6 +164,12 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         });
         fiveHourBox.add_child(this._fiveHourResetLabel);
 
+        this._fiveHourPaceLabel = new St.Label({
+            text: '',
+            style_class: 'claude-pace-label',
+        });
+        fiveHourBox.add_child(this._fiveHourPaceLabel);
+
         const fiveHourItem = new PopupMenu.PopupBaseMenuItem({
             reactive: false,
             can_focus: false,
@@ -208,6 +214,12 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             style_class: 'claude-reset-label',
         });
         sevenDayBox.add_child(this._sevenDayResetLabel);
+
+        this._sevenDayPaceLabel = new St.Label({
+            text: '',
+            style_class: 'claude-pace-label',
+        });
+        sevenDayBox.add_child(this._sevenDayPaceLabel);
 
         const sevenDayItem = new PopupMenu.PopupBaseMenuItem({
             reactive: false,
@@ -568,6 +580,30 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             this._sevenDayResetLabel.set_text(resetText);
         }
 
+        // Pace info
+        const FIVE_HOUR_MS = 5 * 3600000;
+        const SEVEN_DAY_MS = 7 * 86400000;
+
+        if (data.five_hour?.resets_at) {
+            const pace = this._computePace(fiveHour, data.five_hour.resets_at, FIVE_HOUR_MS);
+            const elapsed = this._formatElapsed(pace.elapsedMs, FIVE_HOUR_MS);
+            const sign = pace.delta >= 0 ? 'ahead' : 'behind';
+            const absDelta = Math.abs(pace.delta).toFixed(0);
+            this._fiveHourPaceLabel.set_text(
+                `Elapsed: ${elapsed} | Ideal: ${pace.idealPace.toFixed(0)}% | Actual: ${fiveHour.toFixed(0)}% → ${absDelta}% ${sign} (${pace.hint})`
+            );
+        }
+
+        if (data.seven_day?.resets_at) {
+            const pace = this._computePace(sevenDay, data.seven_day.resets_at, SEVEN_DAY_MS);
+            const elapsed = this._formatElapsed(pace.elapsedMs, SEVEN_DAY_MS);
+            const sign = pace.delta >= 0 ? 'ahead' : 'behind';
+            const absDelta = Math.abs(pace.delta).toFixed(0);
+            this._sevenDayPaceLabel.set_text(
+                `Elapsed: ${elapsed} | Ideal: ${pace.idealPace.toFixed(0)}% | Actual: ${sevenDay.toFixed(0)}% → ${absDelta}% ${sign} (${pace.hint})`
+            );
+        }
+
         // Check for high usage and send notifications
         this._checkUsageWarnings(fiveHour, sevenDay);
     }
@@ -649,6 +685,45 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         } else {
             progressBar.add_style_class_name('usage-low');
         }
+    }
+
+    _computePace(utilization, resetsAt, windowMs) {
+        const now = Date.now();
+        const resetTime = new Date(resetsAt).getTime();
+        const remaining = resetTime - now;
+        const elapsed = windowMs - remaining;
+
+        // Clamp elapsed to [0, windowMs]
+        const elapsedClamped = Math.max(0, Math.min(elapsed, windowMs));
+        const idealPace = (elapsedClamped / windowMs) * 100;
+        const delta = utilization - idealPace;
+
+        let hint;
+        if (Math.abs(delta) < 3) {
+            hint = 'on pace';
+        } else if (delta > 0) {
+            hint = 'slow down';
+        } else {
+            hint = 'rush!';
+        }
+
+        return { elapsedMs: elapsedClamped, idealPace, delta, hint };
+    }
+
+    _formatElapsed(ms, windowMs) {
+        const totalMins = Math.floor(ms / 60000);
+        const hours = Math.floor(totalMins / 60);
+        const mins = totalMins % 60;
+        const days = Math.floor(hours / 24);
+
+        // Format window total
+        const windowHours = Math.round(windowMs / 3600000);
+        const windowDays = windowHours / 24;
+
+        if (windowDays >= 1) {
+            return `${days}d ${hours % 24}h / ${windowDays}d`;
+        }
+        return `${hours}h ${mins}m / ${windowHours}h`;
     }
 
     _computeEtaMs(currentUsage, previousUsage, timeDeltaMs) {
