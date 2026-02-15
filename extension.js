@@ -40,7 +40,6 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._highUsageNotified = { fiveHour: false, sevenDay: false };
         this._consecutiveFailures = 0;
         this._isLoading = false;
-        this._usageHistory = [];
 
         // Create box for panel button
         this._box = new St.BoxLayout({
@@ -76,6 +75,14 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         });
         this._box.add_child(this._label);
 
+        // Add margin label (colored time margin indicator)
+        this._marginLabel = new St.Label({
+            text: '',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'claude-margin-label',
+        });
+        this._box.add_child(this._marginLabel);
+
         this.add_child(this._box);
 
         // Create menu items
@@ -106,14 +113,17 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         if (mode === 'bar') {
             this._panelProgressBg.show();
             this._label.hide();
+            this._marginLabel.hide();
             this._label.set_style('margin-left: 0;');
         } else if (mode === 'both') {
             this._panelProgressBg.show();
             this._label.show();
+            this._marginLabel.show();
             this._label.set_style('margin-left: 6px;');
         } else {
             this._panelProgressBg.hide();
             this._label.show();
+            this._marginLabel.show();
             this._label.set_style('margin-left: 0;');
         }
     }
@@ -162,17 +172,17 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         });
         fiveHourBox.add_child(this._fiveHourProgressBg);
 
+        this._fiveHourMarginLabel = new St.Label({
+            text: '',
+            style_class: 'claude-menu-margin',
+        });
+        fiveHourBox.add_child(this._fiveHourMarginLabel);
+
         this._fiveHourResetLabel = new St.Label({
             text: 'Resets: ...',
             style_class: 'claude-reset-label',
         });
         fiveHourBox.add_child(this._fiveHourResetLabel);
-
-        this._fiveHourPaceLabel = new St.Label({
-            text: '',
-            style_class: 'claude-pace-label',
-        });
-        fiveHourBox.add_child(this._fiveHourPaceLabel);
 
         const fiveHourItem = new PopupMenu.PopupBaseMenuItem({
             reactive: false,
@@ -217,17 +227,17 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         });
         sevenDayBox.add_child(this._sevenDayProgressBg);
 
+        this._sevenDayMarginLabel = new St.Label({
+            text: '',
+            style_class: 'claude-menu-margin',
+        });
+        sevenDayBox.add_child(this._sevenDayMarginLabel);
+
         this._sevenDayResetLabel = new St.Label({
             text: 'Resets: ...',
             style_class: 'claude-reset-label',
         });
         sevenDayBox.add_child(this._sevenDayResetLabel);
-
-        this._sevenDayPaceLabel = new St.Label({
-            text: '',
-            style_class: 'claude-pace-label',
-        });
-        sevenDayBox.add_child(this._sevenDayPaceLabel);
 
         const sevenDayItem = new PopupMenu.PopupBaseMenuItem({
             reactive: false,
@@ -500,65 +510,45 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     _updateDisplay(data) {
         const fiveHour = data.five_hour?.utilization ?? 0;
         const sevenDay = data.seven_day?.utilization ?? 0;
-        const now = Date.now();
 
-        // Track usage history for ETA computation
-        this._usageHistory.push({ timestamp: now, fiveHour, sevenDay });
-        if (this._usageHistory.length > 10) this._usageHistory.shift();
+        const FIVE_HOUR_MS = 5 * 3600000;
+        const SEVEN_DAY_MS = 7 * 86400000;
 
-        // Compute ETA to 100% for each metric (using oldest history point for stability)
-        let fiveHourEtaMs = null;
-        let sevenDayEtaMs = null;
+        // Compute pace and margin for both metrics
+        let fiveHourMargin = null;
         let fiveHourWillHit = false;
-        let sevenDayWillHit = false;
-
-        if (this._usageHistory.length >= 2) {
-            const oldest = this._usageHistory[0];
-            const dt = now - oldest.timestamp;
-
-            const fhEta = this._computeEtaMs(fiveHour, oldest.fiveHour, dt);
-            if (fhEta !== null && data.five_hour?.resets_at) {
-                fiveHourEtaMs = fhEta;
-                const resetMs = new Date(data.five_hour.resets_at) - now;
-                fiveHourWillHit = resetMs > 0 && fhEta < resetMs;
-            }
-
-            const sdEta = this._computeEtaMs(sevenDay, oldest.sevenDay, dt);
-            if (sdEta !== null && data.seven_day?.resets_at) {
-                sevenDayEtaMs = sdEta;
-                const resetMs = new Date(data.seven_day.resets_at) - now;
-                sevenDayWillHit = resetMs > 0 && sdEta < resetMs;
-            }
+        if (data.five_hour?.resets_at) {
+            const pace = this._computePace(fiveHour, data.five_hour.resets_at, FIVE_HOUR_MS);
+            fiveHourMargin = { marginMs: -(pace.delta / 100) * FIVE_HOUR_MS, delta: pace.delta };
+            fiveHourWillHit = fiveHourMargin.marginMs < 0;
         }
 
-        // Panel: show the most concerning metric (will-hit-limit scores higher)
+        let sevenDayMargin = null;
+        let sevenDayWillHit = false;
+        if (data.seven_day?.resets_at) {
+            const pace = this._computePace(sevenDay, data.seven_day.resets_at, SEVEN_DAY_MS);
+            sevenDayMargin = { marginMs: -(pace.delta / 100) * SEVEN_DAY_MS, delta: pace.delta };
+            sevenDayWillHit = sevenDayMargin.marginMs < 0;
+        }
+
+        // Panel: show the most concerning metric
         const fiveHourScore = fiveHour + (fiveHourWillHit ? 100 : 0);
         const sevenDayScore = sevenDay + (sevenDayWillHit ? 100 : 0);
 
-        let panelUsage, panelResetAt, panelWillHit;
+        let panelUsage, panelMargin;
         if (fiveHourScore >= sevenDayScore) {
             panelUsage = fiveHour;
-            panelResetAt = data.five_hour?.resets_at;
-            panelWillHit = fiveHourWillHit;
+            panelMargin = fiveHourMargin;
         } else {
             panelUsage = sevenDay;
-            panelResetAt = data.seven_day?.resets_at;
-            panelWillHit = sevenDayWillHit;
+            panelMargin = sevenDayMargin;
         }
 
-        // Contextual panel label: show reset time when >=50% or approaching limit
-        const showTime = panelUsage >= 50 || panelWillHit;
-        const prefix = panelWillHit ? '\u25B2 ' : '';
-        const timeSuffix = showTime && panelResetAt
-            ? ` \u00B7 ${this._formatResetTime(panelResetAt)}`
-            : '';
-        this._label.set_text(`${prefix}${Math.round(panelUsage)}%${timeSuffix}`);
+        // Panel label: just XX%
+        this._label.set_text(`${Math.round(panelUsage)}%`);
 
-        if (panelWillHit) {
-            this._label.add_style_class_name('claude-usage-label-warn');
-        } else {
-            this._label.remove_style_class_name('claude-usage-label-warn');
-        }
+        // Panel margin label: colored +Xh Ym or -Xh Ym
+        this._updatePanelMarginLabel(panelMargin);
 
         // Panel progress bar
         this._updatePanelProgressBar(panelUsage);
@@ -566,54 +556,70 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         // Popup: 5-hour section
         this._fiveHourPercent.set_text(`${fiveHour.toFixed(1)}%`);
         this._updateProgressBar(this._fiveHourProgressBar, fiveHour);
+        this._updateMenuMarginLabel(this._fiveHourMarginLabel, fiveHourMargin);
+
+        if (data.five_hour?.resets_at) {
+            this._fiveHourResetLabel.set_text(`Resets in ${this._formatResetTime(data.five_hour.resets_at)}`);
+        }
 
         // Popup: 7-day section
         this._sevenDayPercent.set_text(`${sevenDay.toFixed(1)}%`);
         this._updateProgressBar(this._sevenDayProgressBar, sevenDay);
-
-        // Popup: reset times with ETA warnings
-        if (data.five_hour?.resets_at) {
-            let resetText = `Resets in ${this._formatResetTime(data.five_hour.resets_at)}`;
-            if (fiveHourWillHit && fiveHourEtaMs !== null) {
-                resetText += ` \u00B7 \u25B2 ~${this._formatDuration(fiveHourEtaMs)} to limit`;
-            }
-            this._fiveHourResetLabel.set_text(resetText);
-        }
+        this._updateMenuMarginLabel(this._sevenDayMarginLabel, sevenDayMargin);
 
         if (data.seven_day?.resets_at) {
-            let resetText = `Resets in ${this._formatResetTime(data.seven_day.resets_at)}`;
-            if (sevenDayWillHit && sevenDayEtaMs !== null) {
-                resetText += ` \u00B7 \u25B2 ~${this._formatDuration(sevenDayEtaMs)} to limit`;
-            }
-            this._sevenDayResetLabel.set_text(resetText);
-        }
-
-        // Pace info
-        const FIVE_HOUR_MS = 5 * 3600000;
-        const SEVEN_DAY_MS = 7 * 86400000;
-
-        if (data.five_hour?.resets_at) {
-            const pace = this._computePace(fiveHour, data.five_hour.resets_at, FIVE_HOUR_MS);
-            const elapsed = this._formatElapsed(pace.elapsedMs, FIVE_HOUR_MS);
-            const sign = pace.delta >= 0 ? 'ahead' : 'behind';
-            const absDelta = Math.abs(pace.delta).toFixed(0);
-            this._fiveHourPaceLabel.set_text(
-                `Elapsed: ${elapsed} | Ideal: ${pace.idealPace.toFixed(0)}% | Actual: ${fiveHour.toFixed(0)}% → ${absDelta}% ${sign} (${pace.hint})`
-            );
-        }
-
-        if (data.seven_day?.resets_at) {
-            const pace = this._computePace(sevenDay, data.seven_day.resets_at, SEVEN_DAY_MS);
-            const elapsed = this._formatElapsed(pace.elapsedMs, SEVEN_DAY_MS);
-            const sign = pace.delta >= 0 ? 'ahead' : 'behind';
-            const absDelta = Math.abs(pace.delta).toFixed(0);
-            this._sevenDayPaceLabel.set_text(
-                `Elapsed: ${elapsed} | Ideal: ${pace.idealPace.toFixed(0)}% | Actual: ${sevenDay.toFixed(0)}% → ${absDelta}% ${sign} (${pace.hint})`
-            );
+            this._sevenDayResetLabel.set_text(`Resets in ${this._formatResetTime(data.seven_day.resets_at)}`);
         }
 
         // Check for high usage and send notifications
         this._checkUsageWarnings(fiveHour, sevenDay);
+    }
+
+    _updatePanelMarginLabel(margin) {
+        this._marginLabel.remove_style_class_name('claude-margin-ok');
+        this._marginLabel.remove_style_class_name('claude-margin-over');
+
+        if (!margin || Math.abs(margin.delta) < 3) {
+            this._marginLabel.set_text('');
+            this._label.remove_style_class_name('claude-usage-label-warn');
+            return;
+        }
+
+        const absMs = Math.abs(margin.marginMs);
+        const formatted = this._formatDuration(absMs);
+
+        if (margin.marginMs > 0) {
+            this._marginLabel.set_text(`+${formatted}`);
+            this._marginLabel.add_style_class_name('claude-margin-ok');
+            this._label.remove_style_class_name('claude-usage-label-warn');
+        } else {
+            this._marginLabel.set_text(`-${formatted}`);
+            this._marginLabel.add_style_class_name('claude-margin-over');
+            this._label.add_style_class_name('claude-usage-label-warn');
+        }
+    }
+
+    _updateMenuMarginLabel(label, margin) {
+        label.remove_style_class_name('claude-menu-margin-ok');
+        label.remove_style_class_name('claude-menu-margin-over');
+        label.remove_style_class_name('claude-menu-margin-neutral');
+
+        if (!margin || Math.abs(margin.delta) < 3) {
+            label.set_text('On pace');
+            label.add_style_class_name('claude-menu-margin-neutral');
+            return;
+        }
+
+        const absMs = Math.abs(margin.marginMs);
+        const formatted = this._formatDuration(absMs);
+
+        if (margin.marginMs > 0) {
+            label.set_text(`${formatted} to spare`);
+            label.add_style_class_name('claude-menu-margin-ok');
+        } else {
+            label.set_text(`\u25B2 ${formatted} over budget`);
+            label.add_style_class_name('claude-menu-margin-over');
+        }
     }
 
     _checkUsageWarnings(fiveHour, sevenDay) {
@@ -734,31 +740,6 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         return { elapsedMs: elapsedClamped, idealPace, delta, hint };
     }
 
-    _formatElapsed(ms, windowMs) {
-        const totalMins = Math.floor(ms / 60000);
-        const hours = Math.floor(totalMins / 60);
-        const mins = totalMins % 60;
-        const days = Math.floor(hours / 24);
-
-        // Format window total
-        const windowHours = Math.round(windowMs / 3600000);
-        const windowDays = windowHours / 24;
-
-        if (windowDays >= 1) {
-            return `${days}d ${hours % 24}h / ${windowDays}d`;
-        }
-        return `${hours}h ${mins}m / ${windowHours}h`;
-    }
-
-    _computeEtaMs(currentUsage, previousUsage, timeDeltaMs) {
-        if (timeDeltaMs <= 0) return null;
-        const usageDelta = currentUsage - previousUsage;
-        if (usageDelta <= 0) return null;
-        const remaining = 100 - currentUsage;
-        if (remaining <= 0) return 0;
-        return (remaining / usageDelta) * timeDeltaMs;
-    }
-
     _formatDuration(ms) {
         if (ms <= 0) return 'now';
         const diffMins = Math.floor(ms / 60000);
@@ -797,7 +778,6 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._lastUpdateTime = null;
         this._lastError = null;
         this._highUsageNotified = null;
-        this._usageHistory = null;
         this._isLoading = false;
 
         super.destroy();

@@ -99,9 +99,36 @@
     color: #a0a0a0;
 }
 
-/* Pace label styles */
-.claude-pace-label {
-    font-size: 11px;
+/* Panel margin label */
+.claude-margin-label {
+    font-size: 12px;
+    font-weight: bold;
+    margin-left: 4px;
+}
+
+.claude-margin-ok {
+    color: #22c55e;
+}
+
+.claude-margin-over {
+    color: #f97316;
+}
+
+/* Menu margin label */
+.claude-menu-margin {
+    font-size: 12px;
+    font-weight: bold;
+}
+
+.claude-menu-margin-ok {
+    color: #22c55e;
+}
+
+.claude-menu-margin-over {
+    color: #f97316;
+}
+
+.claude-menu-margin-neutral {
     color: #a0a0a0;
 }
 
