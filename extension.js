@@ -553,17 +553,32 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             sevenDayWillHit = sevenDayMargin.marginMs < 0;
         }
 
-        // Panel: show the most concerning metric
-        const fiveHourScore = fiveHour + (fiveHourWillHit ? 100 : 0);
-        const sevenDayScore = sevenDay + (sevenDayWillHit ? 100 : 0);
-
+        // Panel: pick which metric's margin to show
+        // - Any will-hit: largest negative margin (worst overshoot)
+        // - All spare: smallest positive margin (tightest bottleneck)
         let panelUsage, panelMargin;
-        if (fiveHourScore >= sevenDayScore) {
-            panelUsage = fiveHour;
-            panelMargin = fiveHourMargin;
+        if (fiveHourWillHit || sevenDayWillHit) {
+            // Pick the worst overshoot (most negative marginMs)
+            const fiveMs = fiveHourWillHit ? fiveHourMargin.marginMs : 0;
+            const sevenMs = sevenDayWillHit ? sevenDayMargin.marginMs : 0;
+            if (fiveMs <= sevenMs) {
+                panelUsage = fiveHour;
+                panelMargin = fiveHourMargin;
+            } else {
+                panelUsage = sevenDay;
+                panelMargin = sevenDayMargin;
+            }
         } else {
-            panelUsage = sevenDay;
-            panelMargin = sevenDayMargin;
+            // Pick the tightest spare (smallest positive marginMs)
+            const fiveMs = fiveHourMargin?.marginMs ?? Infinity;
+            const sevenMs = sevenDayMargin?.marginMs ?? Infinity;
+            if (fiveMs <= sevenMs) {
+                panelUsage = fiveHour;
+                panelMargin = fiveHourMargin;
+            } else {
+                panelUsage = sevenDay;
+                panelMargin = sevenDayMargin;
+            }
         }
 
         // Panel label: just XX%
