@@ -626,11 +626,11 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         const formatted = this._formatDuration(absMs);
 
         if (margin.marginMs > 0) {
-            this._marginLabel.set_text(`+${formatted}`);
+            this._marginLabel.set_text(`-${formatted}`);
             this._marginLabel.add_style_class_name('claude-margin-ok');
             this._label.remove_style_class_name('claude-usage-label-warn');
         } else {
-            this._marginLabel.set_text(`-${formatted}`);
+            this._marginLabel.set_text(`+${formatted}`);
             this._marginLabel.add_style_class_name('claude-margin-over');
             this._label.add_style_class_name('claude-usage-label-warn');
         }
