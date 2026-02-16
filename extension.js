@@ -41,6 +41,18 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._consecutiveFailures = 0;
         this._isLoading = false;
 
+        // Suppress error notifications during startup grace period (token may need refresh)
+        this._inGracePeriod = true;
+        this._graceTimerId = GLib.timeout_add_seconds(
+            GLib.PRIORITY_DEFAULT,
+            60,
+            () => {
+                this._inGracePeriod = false;
+                this._graceTimerId = null;
+                return GLib.SOURCE_REMOVE;
+            }
+        );
+
         // Create box for panel button
         this._box = new St.BoxLayout({
             style_class: 'panel-status-menu-box',
@@ -330,8 +342,8 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._fiveHourPercent.set_text(errorMessage);
         this._sevenDayPercent.set_text('—');
 
-        // Only show notification once per session for credential errors
-        if (!this._lastError || !this._lastError.includes('credentials')) {
+        // Only show notification once per session, and not during grace period
+        if (!this._inGracePeriod && (!this._lastError || !this._lastError.includes('credentials'))) {
             this._showNotification(
                 'Claude Usage: Credentials Error',
                 `${errorMessage}. Please check ~/.claude/.credentials.json`
@@ -432,15 +444,25 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     _handleAuthError() {
         this._consecutiveFailures++;
         this._lastError = 'Authentication failed';
+
+        // Auth errors are often transient (expired token after resume/boot).
+        // Retry silently before alarming the user.
+        if (this._shouldRetry()) {
+            this._label.set_text(`Retry…`);
+            this._scheduleRetry();
+            return;
+        }
+
         this._label.set_text('Auth Error');
         this._fiveHourPercent.set_text('Check credentials');
         this._sevenDayPercent.set_text('—');
 
-        // Show notification for auth errors
-        this._showNotification(
-            'Claude Usage: Authentication Failed',
-            'Please check your credentials at ~/.claude/.credentials.json'
-        );
+        if (!this._inGracePeriod) {
+            this._showNotification(
+                'Claude Usage: Authentication Failed',
+                'Please check your credentials at ~/.claude/.credentials.json'
+            );
+        }
     }
 
     _handleHttpError(statusCode) {
@@ -467,7 +489,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             this._fiveHourPercent.set_text('Network error');
             this._sevenDayPercent.set_text('—');
 
-            if (this._consecutiveFailures >= MAX_RETRY_ATTEMPTS) {
+            if (this._consecutiveFailures >= MAX_RETRY_ATTEMPTS && !this._inGracePeriod) {
                 this._showNotification(
                     'Claude Usage: Connection Failed',
                     'Unable to reach Claude API after multiple attempts'
@@ -760,6 +782,11 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
 
     destroy() {
         this._stopTimer();
+
+        if (this._graceTimerId) {
+            GLib.source_remove(this._graceTimerId);
+            this._graceTimerId = null;
+        }
 
         // Clean up session
         if (this._session) {
