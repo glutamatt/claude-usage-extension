@@ -518,8 +518,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             }
         }
 
-        // Panel label: just XX%
-        this._label.set_text(`${Math.round(panelUsage)}%`);
+        this._label.set_text('');
 
         // Panel margin label: colored +Xh Ym or -Xh Ym
         this._updatePanelMarginLabel(panelMargin);
