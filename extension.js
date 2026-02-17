@@ -9,19 +9,14 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
-import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
+import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 // Configuration constants
 const API_URL = 'https://api.anthropic.com/api/oauth/usage';
 const PANEL_PROGRESS_BAR_WIDTH = 50;
 const MENU_PROGRESS_BAR_WIDTH = 200;
-const MIN_REFRESH_INTERVAL = 10;
-const MAX_REFRESH_INTERVAL = 600;
-const DEFAULT_REFRESH_INTERVAL = 300;
-const USAGE_WARNING_THRESHOLD = 0.80;
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_DELAYS = [5, 10, 20]; // seconds for each retry attempt
-const STALE_DATA_MULTIPLIER = 2; // Data is stale if older than 2x refresh interval
 
 const ClaudeUsageIndicator = GObject.registerClass(
 class ClaudeUsageIndicator extends PanelMenu.Button {
@@ -33,25 +28,8 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._openPreferences = openPreferences;
         this._session = new Soup.Session();
 
-        // State tracking for retry logic and notifications
         this._retryAttempt = 0;
-        this._lastUpdateTime = null;
-        this._lastError = null;
-        this._highUsageNotified = { fiveHour: false, sevenDay: false };
-        this._consecutiveFailures = 0;
         this._isLoading = false;
-
-        // Suppress error notifications during startup grace period (token may need refresh)
-        this._inGracePeriod = true;
-        this._graceTimerId = GLib.timeout_add_seconds(
-            GLib.PRIORITY_DEFAULT,
-            60,
-            () => {
-                this._inGracePeriod = false;
-                this._graceTimerId = null;
-                return GLib.SOURCE_REMOVE;
-            }
-        );
 
         // Create box for panel button
         this._box = new St.BoxLayout({
@@ -338,19 +316,9 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     }
 
     _handleCredentialsError(errorMessage) {
-        this._label.set_text('No token');
+        this._label.set_text('⚠️');
         this._fiveHourPercent.set_text(errorMessage);
         this._sevenDayPercent.set_text('—');
-
-        // Only show notification once per session, and not during grace period
-        if (!this._inGracePeriod && (!this._lastError || !this._lastError.includes('credentials'))) {
-            this._showNotification(
-                'Claude Usage: Credentials Error',
-                `${errorMessage}. Please check ~/.claude/.credentials.json`
-            );
-        }
-
-        this._lastError = errorMessage;
     }
 
     _fetchUsage(token) {
@@ -404,11 +372,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                         return;
                     }
 
-                    // Success - reset retry counter and update display
                     this._retryAttempt = 0;
-                    this._consecutiveFailures = 0;
-                    this._lastError = null;
-                    this._lastUpdateTime = Date.now();
                     this._updateDisplay(data);
 
                 } catch (e) {
@@ -442,66 +406,39 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     }
 
     _handleAuthError() {
-        this._consecutiveFailures++;
-        this._lastError = 'Authentication failed';
-
-        // Auth errors are often transient (expired token after resume/boot).
-        // Retry silently before alarming the user.
         if (this._shouldRetry()) {
-            this._label.set_text(`Retry…`);
+            this._label.set_text('⏳');
             this._scheduleRetry();
             return;
         }
 
-        this._label.set_text('Auth Error');
-        this._fiveHourPercent.set_text('Check credentials');
+        this._label.set_text('🚨');
+        this._fiveHourPercent.set_text('Auth failed');
         this._sevenDayPercent.set_text('—');
-
-        if (!this._inGracePeriod) {
-            this._showNotification(
-                'Claude Usage: Authentication Failed',
-                'Please check your credentials at ~/.claude/.credentials.json'
-            );
-        }
     }
 
     _handleHttpError(statusCode) {
-        this._consecutiveFailures++;
-        this._lastError = `HTTP ${statusCode}`;
-
         if (this._shouldRetry()) {
             this._scheduleRetry();
         } else {
-            this._label.set_text('Error');
+            this._label.set_text('⚠️');
             this._fiveHourPercent.set_text(`HTTP ${statusCode}`);
             this._sevenDayPercent.set_text('—');
         }
     }
 
     _handleNetworkError(errorMessage) {
-        this._consecutiveFailures++;
-        this._lastError = errorMessage;
-
         if (this._shouldRetry()) {
             this._scheduleRetry();
         } else {
-            this._label.set_text('Error');
+            this._label.set_text('⚠️');
             this._fiveHourPercent.set_text('Network error');
             this._sevenDayPercent.set_text('—');
-
-            if (this._consecutiveFailures >= MAX_RETRY_ATTEMPTS && !this._inGracePeriod) {
-                this._showNotification(
-                    'Claude Usage: Connection Failed',
-                    'Unable to reach Claude API after multiple attempts'
-                );
-            }
         }
     }
 
     _handleError(errorMessage) {
-        this._consecutiveFailures++;
-        this._lastError = errorMessage;
-        this._label.set_text('Error');
+        this._label.set_text('⚠️');
         this._fiveHourPercent.set_text(errorMessage);
         this._sevenDayPercent.set_text('—');
     }
@@ -516,7 +453,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         }
 
         const delay = RETRY_DELAYS[this._retryAttempt];
-        this._label.set_text(`Retry ${delay}s`);
+        this._label.set_text('⏳');
 
         GLib.timeout_add_seconds(
             GLib.PRIORITY_DEFAULT,
@@ -608,8 +545,6 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             this._sevenDayResetLabel.set_text(`Resets in ${this._formatResetTime(data.seven_day.resets_at)}`);
         }
 
-        // Check for high usage and send notifications
-        this._checkUsageWarnings(fiveHour, sevenDay);
     }
 
     _updatePanelMarginLabel(margin) {
@@ -656,44 +591,6 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         } else {
             label.set_text(`\u25B2 ${formatted} over budget`);
             label.add_style_class_name('claude-menu-margin-over');
-        }
-    }
-
-    _checkUsageWarnings(fiveHour, sevenDay) {
-        const fiveHourDecimal = fiveHour / 100;
-        const sevenDayDecimal = sevenDay / 100;
-
-        // Check 5-hour usage threshold
-        if (fiveHourDecimal >= USAGE_WARNING_THRESHOLD && !this._highUsageNotified.fiveHour) {
-            this._showNotification(
-                'Claude Usage Warning: 5-Hour Limit',
-                `You've used ${fiveHour.toFixed(1)}% of your 5-hour limit`
-            );
-            this._highUsageNotified.fiveHour = true;
-        } else if (fiveHourDecimal < USAGE_WARNING_THRESHOLD) {
-            // Reset notification flag when usage drops below threshold
-            this._highUsageNotified.fiveHour = false;
-        }
-
-        // Check 7-day usage threshold
-        if (sevenDayDecimal >= USAGE_WARNING_THRESHOLD && !this._highUsageNotified.sevenDay) {
-            this._showNotification(
-                'Claude Usage Warning: 7-Day Limit',
-                `You've used ${sevenDay.toFixed(1)}% of your 7-day limit`
-            );
-            this._highUsageNotified.sevenDay = true;
-        } else if (sevenDayDecimal < USAGE_WARNING_THRESHOLD) {
-            // Reset notification flag when usage drops below threshold
-            this._highUsageNotified.sevenDay = false;
-        }
-    }
-
-    _showNotification(title, message) {
-        try {
-            // Use GNOME Shell's notification system
-            Main.notify(title, message);
-        } catch (e) {
-            console.error('Claude Usage: Failed to show notification:', e.message);
         }
     }
 
@@ -765,16 +662,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         const idealPace = (elapsedClamped / windowMs) * 100;
         const delta = utilization - idealPace;
 
-        let hint;
-        if (Math.abs(delta) < 3) {
-            hint = 'on pace';
-        } else if (delta > 0) {
-            hint = 'slow down';
-        } else {
-            hint = 'rush!';
-        }
-
-        return { elapsedMs: elapsedClamped, idealPace, delta, hint };
+        return { delta };
     }
 
     _formatDuration(ms) {
@@ -798,11 +686,6 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     destroy() {
         this._stopTimer();
 
-        if (this._graceTimerId) {
-            GLib.source_remove(this._graceTimerId);
-            this._graceTimerId = null;
-        }
-
         // Clean up session
         if (this._session) {
             this._session.abort();
@@ -815,11 +698,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             this._settingsChangedId = null;
         }
 
-        // Reset state
         this._retryAttempt = 0;
-        this._lastUpdateTime = null;
-        this._lastError = null;
-        this._highUsageNotified = null;
         this._isLoading = false;
 
         super.destroy();
