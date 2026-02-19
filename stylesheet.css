@@ -1,161 +1,121 @@
-/* Panel button styles */
-.claude-icon {
-    margin-right: 6px;
+/* === Top bar === */
+
+.panel-icon {
+    margin-right: 4px;
 }
 
-.claude-usage-label {
-    font-size: 12px;
+.panel-provider-label {
+    font-size: 11px;
     font-weight: bold;
+    color: #a0a0a0;
+    margin-right: 4px;
 }
 
-.claude-usage-label-warn {
-    color: #f97316;
-}
-
-/* Panel progress bar */
-.claude-panel-progress-bg {
+.panel-bar-bg {
     background-color: rgba(255, 255, 255, 0.2);
     border-radius: 3px;
     height: 6px;
     width: 50px;
+}
+
+.panel-bar-fill {
+    height: 6px;
+    border-radius: 3px;
+    background-color: #ffffff;
+    transition: width 300ms ease-out;
+}
+
+.panel-margin {
+    font-size: 12px;
+    font-weight: bold;
     margin-left: 4px;
 }
 
-.claude-panel-progress-bar {
-    height: 6px;
-    border-radius: 3px;
-    transition: width 300ms ease-out;
-    background-color: #ffffff;
+.panel-error {
+    font-size: 12px;
+    margin-left: 4px;
 }
 
-.claude-panel-progress-bar.usage-low {
-    background-color: #22c55e;
+.margin-ok {
+    color: #22c55e;
 }
 
-.claude-panel-progress-bar.usage-medium {
-    background-color: #eab308;
+.margin-over {
+    color: #f97316;
 }
 
-.claude-panel-progress-bar.usage-high {
-    background-color: #f97316;
+/* === Popup menu === */
+
+.menu-metric {
+    padding: 2px 0;
+    spacing: 2px;
+    min-width: 280px;
 }
 
-.claude-panel-progress-bar.usage-critical {
-    background-color: #ef4444;
+.menu-metric-icon {
+    margin-right: 6px;
 }
 
-/* Usage section styles */
-.claude-usage-section {
-    padding: 4px 0;
-    spacing: 6px;
-    min-width: 220px;
+.menu-metric-provider {
+    font-size: 11px;
+    font-weight: bold;
+    color: #a0a0a0;
+    margin-right: 6px;
 }
 
-.claude-section-title {
+.menu-metric-header {
     font-size: 13px;
     font-weight: 600;
     color: #e0e0e0;
+    margin-right: 8px;
 }
 
-.claude-percent-label {
-    font-size: 13px;
-    font-weight: bold;
-    color: #ffffff;
-}
-
-/* Progress bar styles */
-.claude-progress-bg {
+.menu-bar-bg {
     background-color: rgba(255, 255, 255, 0.1);
     border-radius: 4px;
     height: 8px;
-    margin: 4px 0;
 }
 
-.claude-progress-bar {
+.menu-bar-fill {
     height: 8px;
     border-radius: 4px;
     transition: width 300ms ease-out;
 }
 
-.claude-progress-bar.usage-low {
+.menu-bar-fill.usage-low {
     background-color: #22c55e;
 }
 
-.claude-progress-bar.usage-medium {
+.menu-bar-fill.usage-medium {
     background-color: #eab308;
 }
 
-.claude-progress-bar.usage-high {
+.menu-bar-fill.usage-high {
     background-color: #f97316;
 }
 
-.claude-progress-bar.usage-critical {
+.menu-bar-fill.usage-critical {
     background-color: #ef4444;
 }
 
-/* Reset label styles */
-.claude-reset-label {
+.menu-metric-reset {
     font-size: 11px;
     color: #a0a0a0;
 }
 
-/* Panel margin label */
-.claude-margin-label {
-    font-size: 12px;
-    font-weight: bold;
-    margin-left: 4px;
-}
-
-.claude-margin-ok {
-    color: #22c55e;
-}
-
-.claude-margin-over {
-    color: #f97316;
-}
-
-/* Menu margin label */
-.claude-menu-margin {
+.menu-metric-margin {
     font-size: 12px;
     font-weight: bold;
 }
 
-.claude-menu-margin-ok {
+.menu-margin-ok {
     color: #22c55e;
 }
 
-.claude-menu-margin-over {
+.menu-margin-over {
     color: #f97316;
 }
 
-.claude-menu-margin-neutral {
+.menu-margin-neutral {
     color: #a0a0a0;
-}
-
-/* Footer styles */
-.claude-footer-box {
-    padding: 6px 0;
-    spacing: 12px;
-}
-
-.claude-refresh-button {
-    padding: 4px 12px;
-    border-radius: 4px;
-    background-color: rgba(255, 255, 255, 0.1);
-    color: #ffffff;
-    font-size: 12px;
-}
-
-.claude-refresh-button:hover {
-    background-color: rgba(255, 255, 255, 0.2);
-}
-
-.claude-refresh-button:active {
-    background-color: rgba(255, 255, 255, 0.15);
-}
-
-.claude-last-updated-label {
-    font-size: 10px;
-    font-style: italic;
-    color: #808080;
 }

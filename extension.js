@@ -11,251 +11,238 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-// Configuration constants
-const API_URL = 'https://api.anthropic.com/api/oauth/usage';
-const PANEL_PROGRESS_BAR_WIDTH = 50;
-const MENU_PROGRESS_BAR_WIDTH = 200;
+const CLAUDE_API_URL = 'https://api.anthropic.com/api/oauth/usage';
+const CODEX_API_URL = 'https://chatgpt.com/backend-api/wham/usage';
+const PANEL_BAR_WIDTH = 50;
 const MAX_RETRY_ATTEMPTS = 3;
-const RETRY_DELAYS = [5, 10, 20]; // seconds for each retry attempt
+const RETRY_DELAYS = [5, 10, 20];
+const FIVE_HOUR_MS = 5 * 3600000;
+const SEVEN_DAY_MS = 7 * 86400000;
 
-const ClaudeUsageIndicator = GObject.registerClass(
-class ClaudeUsageIndicator extends PanelMenu.Button {
+const UsageIndicator = GObject.registerClass(
+class UsageIndicator extends PanelMenu.Button {
     _init(extensionPath, settings, openPreferences) {
-        super._init(0.0, 'Claude Usage Indicator');
+        super._init(0.0, 'AI Usage Indicator');
 
         this._extensionPath = extensionPath;
         this._settings = settings;
         this._openPreferences = openPreferences;
         this._session = new Soup.Session();
 
-        this._retryAttempt = 0;
-        this._isLoading = false;
+        // Per-provider state
+        this._claude = { retryAttempt: 0, loading: false, data: null, error: null };
+        this._codex = { retryAttempt: 0, loading: false, data: null, error: null };
 
-        // Create box for panel button
-        this._box = new St.BoxLayout({
-            style_class: 'panel-status-menu-box',
-        });
+        // --- Top bar layout ---
+        this._box = new St.BoxLayout({ style_class: 'panel-status-menu-box' });
 
-        // Add Claude icon
-        const iconPath = GLib.build_filenamev([this._extensionPath, 'claude-icon-22.png']);
-        const gicon = Gio.icon_new_for_string(iconPath);
-        this._icon = new St.Icon({
-            gicon: gicon,
-            style_class: 'claude-icon',
-            icon_size: 16,
-        });
-        this._box.add_child(this._icon);
+        // Claude panel section
+        this._claudePanel = this._createPanelSection(
+            GLib.build_filenamev([this._extensionPath, 'claude-icon-22.png']),
+            null
+        );
+        this._box.add_child(this._claudePanel.container);
 
-        // Add progress bar (for bar mode)
-        this._panelProgressBg = new St.Widget({
-            style_class: 'claude-panel-progress-bg',
-            y_align: Clutter.ActorAlign.CENTER,
-        });
-        this._panelProgressBar = new St.Widget({
-            style_class: 'claude-panel-progress-bar',
-        });
-        this._panelProgressBg.add_child(this._panelProgressBar);
-        this._box.add_child(this._panelProgressBg);
-
-        // Add usage label (after progress bar)
-        this._label = new St.Label({
-            text: '...',
-            y_align: Clutter.ActorAlign.CENTER,
-            style_class: 'claude-usage-label',
-        });
-        this._box.add_child(this._label);
-
-        // Add margin label (colored time margin indicator)
-        this._marginLabel = new St.Label({
-            text: '',
-            y_align: Clutter.ActorAlign.CENTER,
-            style_class: 'claude-margin-label',
-        });
-        this._box.add_child(this._marginLabel);
+        // Codex panel section
+        this._codexPanel = this._createPanelSection(
+            null,
+            'Cx'
+        );
+        this._codexPanel.container.set_style('margin-left: 8px;');
+        this._box.add_child(this._codexPanel.container);
 
         this.add_child(this._box);
 
-        // Create menu items
+        // --- Popup menu ---
         this._createMenu();
 
-        // Update display mode and icon visibility
-        this._updateDisplayMode();
-        this._updateIconVisibility();
-
-        // Connect settings changes
-        this._settingsChangedId = this._settings.connect('changed', (settings, key) => {
-            if (key === 'refresh-interval') {
-                this._restartTimer();
-            } else if (key === 'display-mode') {
-                this._updateDisplayMode();
-            } else if (key === 'show-icon') {
-                this._updateIconVisibility();
-            }
+        // Settings & timer
+        this._settingsChangedId = this._settings.connect('changed', (_s, key) => {
+            if (key === 'refresh-interval') this._restartTimer();
         });
 
-        // Start refresh timer
-        this._refreshUsage();
+        this._refreshAll();
         this._startTimer();
     }
 
-    _updateDisplayMode() {
-        const mode = this._settings.get_string('display-mode');
-        if (mode === 'bar') {
-            this._panelProgressBg.show();
-            this._label.hide();
-            this._marginLabel.hide();
-            this._label.set_style('margin-left: 0;');
-        } else if (mode === 'both') {
-            this._panelProgressBg.show();
-            this._label.show();
-            this._marginLabel.show();
-            this._label.set_style('margin-left: 6px;');
-        } else {
-            this._panelProgressBg.hide();
-            this._label.show();
-            this._marginLabel.show();
-            this._label.set_style('margin-left: 0;');
-        }
-    }
+    _createPanelSection(iconPath, textLabel) {
+        const container = new St.BoxLayout({ y_align: Clutter.ActorAlign.CENTER });
 
-    _updateIconVisibility() {
-        const showIcon = this._settings.get_boolean('show-icon');
-        if (showIcon) {
-            this._icon.show();
-        } else {
-            this._icon.hide();
+        if (iconPath) {
+            const gicon = Gio.icon_new_for_string(iconPath);
+            const icon = new St.Icon({
+                gicon,
+                style_class: 'panel-icon',
+                icon_size: 16,
+            });
+            container.add_child(icon);
+        } else if (textLabel) {
+            const label = new St.Label({
+                text: textLabel,
+                y_align: Clutter.ActorAlign.CENTER,
+                style_class: 'panel-provider-label',
+            });
+            container.add_child(label);
         }
+
+        const progressBg = new St.Widget({
+            style_class: 'panel-bar-bg',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        const progressBar = new St.Widget({ style_class: 'panel-bar-fill' });
+        progressBg.add_child(progressBar);
+        container.add_child(progressBg);
+
+        const marginLabel = new St.Label({
+            text: '',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'panel-margin',
+        });
+        container.add_child(marginLabel);
+
+        const errorLabel = new St.Label({
+            text: '',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'panel-error',
+        });
+        errorLabel.hide();
+        container.add_child(errorLabel);
+
+        return { container, progressBg, progressBar, marginLabel, errorLabel };
     }
 
     _createMenu() {
-        // 5-hour usage section
-        const fiveHourBox = new St.BoxLayout({
-            style_class: 'claude-usage-section',
-            vertical: true,
-        });
-        const fiveHourHeader = new St.BoxLayout({ vertical: false });
-        const fiveHourLabel = new St.Label({
-            text: '5-Hour Usage',
-            style_class: 'claude-section-title',
-        });
-        fiveHourHeader.add_child(fiveHourLabel);
-        this._fiveHourPercent = new St.Label({
-            text: '...',
-            style_class: 'claude-percent-label',
-            x_expand: true,
-            x_align: Clutter.ActorAlign.END,
-        });
-        fiveHourHeader.add_child(this._fiveHourPercent);
-        fiveHourBox.add_child(fiveHourHeader);
+        // Claude sections
+        this._claudeMenu5h = this._createMenuRow(
+            GLib.build_filenamev([this._extensionPath, 'claude-icon-22.png']),
+            null, '5-Hour'
+        );
+        this.menu.addMenuItem(this._claudeMenu5h.item);
 
-        // Progress bar for 5-hour
-        this._fiveHourProgressBg = new St.Widget({
-            style_class: 'claude-progress-bg',
-            clip_to_allocation: true,
-        });
-        this._fiveHourProgressBar = new St.Widget({
-            style_class: 'claude-progress-bar usage-low',
-        });
-        this._fiveHourProgressBg.add_child(this._fiveHourProgressBar);
-        this._fiveHourProgressBg.connect('notify::allocation', () => {
-            this._syncProgressBarToAllocation(this._fiveHourProgressBar);
-        });
-        fiveHourBox.add_child(this._fiveHourProgressBg);
-
-        this._fiveHourMarginLabel = new St.Label({
-            text: '',
-            style_class: 'claude-menu-margin',
-        });
-        fiveHourBox.add_child(this._fiveHourMarginLabel);
-
-        this._fiveHourResetLabel = new St.Label({
-            text: 'Resets: ...',
-            style_class: 'claude-reset-label',
-        });
-        fiveHourBox.add_child(this._fiveHourResetLabel);
-
-        const fiveHourItem = new PopupMenu.PopupBaseMenuItem({
-            reactive: false,
-            can_focus: false,
-        });
-        fiveHourItem.add_child(fiveHourBox);
-        this.menu.addMenuItem(fiveHourItem);
+        this._claudeMenu7d = this._createMenuRow(
+            GLib.build_filenamev([this._extensionPath, 'claude-icon-22.png']),
+            null, '7-Day'
+        );
+        this.menu.addMenuItem(this._claudeMenu7d.item);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        // 7-day usage section
-        const sevenDayBox = new St.BoxLayout({
-            style_class: 'claude-usage-section',
-            vertical: true,
-        });
-        const sevenDayHeader = new St.BoxLayout({ vertical: false });
-        const sevenDayLabel = new St.Label({
-            text: '7-Day Usage',
-            style_class: 'claude-section-title',
-        });
-        sevenDayHeader.add_child(sevenDayLabel);
-        this._sevenDayPercent = new St.Label({
-            text: '...',
-            style_class: 'claude-percent-label',
-            x_expand: true,
-            x_align: Clutter.ActorAlign.END,
-        });
-        sevenDayHeader.add_child(this._sevenDayPercent);
-        sevenDayBox.add_child(sevenDayHeader);
+        // Codex sections
+        this._codexMenu5h = this._createMenuRow(null, 'Cx', '5-Hour');
+        this.menu.addMenuItem(this._codexMenu5h.item);
 
-        // Progress bar for 7-day
-        this._sevenDayProgressBg = new St.Widget({
-            style_class: 'claude-progress-bg',
-            clip_to_allocation: true,
-        });
-        this._sevenDayProgressBar = new St.Widget({
-            style_class: 'claude-progress-bar usage-low',
-        });
-        this._sevenDayProgressBg.add_child(this._sevenDayProgressBar);
-        this._sevenDayProgressBg.connect('notify::allocation', () => {
-            this._syncProgressBarToAllocation(this._sevenDayProgressBar);
-        });
-        sevenDayBox.add_child(this._sevenDayProgressBg);
-
-        this._sevenDayMarginLabel = new St.Label({
-            text: '',
-            style_class: 'claude-menu-margin',
-        });
-        sevenDayBox.add_child(this._sevenDayMarginLabel);
-
-        this._sevenDayResetLabel = new St.Label({
-            text: 'Resets: ...',
-            style_class: 'claude-reset-label',
-        });
-        sevenDayBox.add_child(this._sevenDayResetLabel);
-
-        const sevenDayItem = new PopupMenu.PopupBaseMenuItem({
-            reactive: false,
-            can_focus: false,
-        });
-        sevenDayItem.add_child(sevenDayBox);
-        this.menu.addMenuItem(sevenDayItem);
+        this._codexMenu7d = this._createMenuRow(null, 'Cx', '7-Day');
+        this.menu.addMenuItem(this._codexMenu7d.item);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        // Settings menu item
         const settingsItem = new PopupMenu.PopupMenuItem('Settings');
-        settingsItem.connect('activate', () => {
-            this._openPreferences();
-        });
+        settingsItem.connect('activate', () => this._openPreferences());
         this.menu.addMenuItem(settingsItem);
     }
 
+    // Creates a condensed popup row:
+    // Line 1: [icon] 5-Hour : 42% [========----]
+    // Line 2:        Resets in 3h 15m     2h to spare
+    _createMenuRow(iconPath, textLabel, windowLabel) {
+        const box = new St.BoxLayout({
+            style_class: 'menu-metric',
+            vertical: true,
+        });
+
+        // Line 1: icon + label + gauge
+        const line1 = new St.BoxLayout({ vertical: false, y_align: Clutter.ActorAlign.CENTER });
+
+        if (iconPath) {
+            const gicon = Gio.icon_new_for_string(iconPath);
+            const icon = new St.Icon({
+                gicon,
+                style_class: 'menu-metric-icon',
+                icon_size: 14,
+            });
+            line1.add_child(icon);
+        } else if (textLabel) {
+            const label = new St.Label({
+                text: textLabel,
+                y_align: Clutter.ActorAlign.CENTER,
+                style_class: 'menu-metric-provider',
+            });
+            line1.add_child(label);
+        }
+
+        const headerLabel = new St.Label({
+            text: `${windowLabel} : ...`,
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'menu-metric-header',
+        });
+        line1.add_child(headerLabel);
+
+        const progressBg = new St.Widget({
+            style_class: 'menu-bar-bg',
+            x_expand: true,
+            clip_to_allocation: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        const progressBar = new St.Widget({
+            style_class: 'menu-bar-fill usage-low',
+        });
+        progressBg.add_child(progressBar);
+        progressBg.connect('notify::allocation', () => {
+            this._syncMenuBarWidth(progressBar);
+        });
+        line1.add_child(progressBg);
+        box.add_child(line1);
+
+        // Line 2: reset left, margin right
+        const line2 = new St.BoxLayout({ vertical: false });
+
+        const resetLabel = new St.Label({
+            text: '',
+            style_class: 'menu-metric-reset',
+        });
+        line2.add_child(resetLabel);
+
+        const marginLabel = new St.Label({
+            text: '',
+            style_class: 'menu-metric-margin',
+            x_expand: true,
+            x_align: Clutter.ActorAlign.END,
+        });
+        line2.add_child(marginLabel);
+
+        box.add_child(line2);
+
+        const item = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+        });
+        item.add_child(box);
+
+        return {
+            item, headerLabel, progressBg, progressBar,
+            resetLabel, marginLabel, windowLabel,
+        };
+    }
+
+    _syncMenuBarWidth(bar) {
+        const usage = bar._usage;
+        if (usage === undefined) return;
+        const parent = bar.get_parent();
+        if (!parent) return;
+        const alloc = parent.get_allocation_box();
+        const w = alloc.get_width();
+        if (w <= 0) return;
+        bar.set_width(Math.round((Math.min(100, Math.max(0, usage)) / 100) * w));
+    }
+
+    // --- Timer ---
+
     _startTimer() {
         const interval = this._settings.get_int('refresh-interval');
-        this._timerId = GLib.timeout_add_seconds(
-            GLib.PRIORITY_DEFAULT,
-            interval,
-            () => {
-                this._refreshUsage();
-                return GLib.SOURCE_CONTINUE;
-            }
-        );
+        this._timerId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, interval, () => {
+            this._refreshAll();
+            return GLib.SOURCE_CONTINUE;
+        });
     }
 
     _stopTimer() {
@@ -270,408 +257,371 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._startTimer();
     }
 
-    _refreshUsage() {
+    _refreshAll() {
+        this._refreshClaude();
+        this._refreshCodex();
+    }
+
+    // --- Claude provider ---
+
+    _refreshClaude() {
         const configDir = GLib.getenv('CLAUDE_CONFIG_DIR') ??
             GLib.build_filenamev([GLib.get_home_dir(), '.claude']);
-        const credentialsPath = GLib.build_filenamev([
-            configDir,
-            '.credentials.json',
-        ]);
+        const path = GLib.build_filenamev([configDir, '.credentials.json']);
 
-        const file = Gio.File.new_for_path(credentialsPath);
-        file.load_contents_async(null, (file, result) => {
+        this._loadJsonFile(path, (json) => {
+            const token = json?.claudeAiOauth?.accessToken;
+            if (!token || typeof token !== 'string' || token.trim() === '') {
+                this._setProviderError(this._claude, this._claudePanel, 'No token');
+                this._updateClaudeMenu();
+                return;
+            }
+            this._fetchClaude(token);
+        }, (err) => {
+            this._setProviderError(this._claude, this._claudePanel, '⚠️');
+            this._updateClaudeMenu();
+        });
+    }
+
+    _fetchClaude(token) {
+        if (this._claude.loading) return;
+        this._claude.loading = true;
+
+        const msg = Soup.Message.new('GET', CLAUDE_API_URL);
+        msg.request_headers.append('Authorization', `Bearer ${token}`);
+        msg.request_headers.append('anthropic-beta', 'oauth-2025-04-20');
+
+        this._session.send_and_read_async(msg, GLib.PRIORITY_DEFAULT, null, (session, result) => {
+            this._claude.loading = false;
             try {
-                const [success, contents] = file.load_contents_finish(result);
+                const bytes = session.send_and_read_finish(result);
 
-                if (!success) {
-                    this._handleCredentialsError('Credentials file not found');
+                if (msg.status_code === 401 || msg.status_code === 403) {
+                    this._handleProviderRetry(this._claude, this._claudePanel, '🚨', () => this._refreshClaude());
+                    return;
+                }
+                if (msg.status_code !== 200) {
+                    this._handleProviderRetry(this._claude, this._claudePanel, '⚠️', () => this._refreshClaude());
                     return;
                 }
 
-                const decoder = new TextDecoder('utf-8');
-                const contentString = decoder.decode(contents);
-
-                let json;
-                try {
-                    json = JSON.parse(contentString);
-                } catch (parseError) {
-                    console.error('Claude Usage: Invalid JSON in credentials file:', parseError.message);
-                    this._handleCredentialsError('Invalid credentials file');
+                const data = JSON.parse(new TextDecoder().decode(bytes.get_data()));
+                if (!data?.five_hour?.utilization === undefined || data?.seven_day?.utilization === undefined) {
+                    this._setProviderError(this._claude, this._claudePanel, '⚠️');
+                    this._updateClaudeMenu();
                     return;
                 }
 
-                const token = json?.claudeAiOauth?.accessToken;
-
-                if (!token || typeof token !== 'string' || token.trim() === '') {
-                    this._handleCredentialsError('No access token found');
-                    return;
-                }
-
-                this._fetchUsage(token);
+                this._claude.retryAttempt = 0;
+                this._claude.error = null;
+                this._claude.data = {
+                    fiveHour: { utilization: data.five_hour.utilization, resetsAt: data.five_hour.resets_at },
+                    sevenDay: { utilization: data.seven_day.utilization, resetsAt: data.seven_day.resets_at },
+                };
+                this._updateClaudePanel();
+                this._updateClaudeMenu();
             } catch (e) {
-                console.error('Claude Usage: Failed to read credentials:', e.message);
-                this._handleCredentialsError('Failed to read credentials');
+                console.error('Claude fetch error:', e.message);
+                this._handleProviderRetry(this._claude, this._claudePanel, '⚠️', () => this._refreshClaude());
             }
         });
     }
 
-    _handleCredentialsError(errorMessage) {
-        this._label.set_text('⚠️');
-        this._fiveHourPercent.set_text(errorMessage);
-        this._sevenDayPercent.set_text('—');
+    _updateClaudePanel() {
+        this._updateProviderPanel(this._claude, this._claudePanel);
     }
 
-    _fetchUsage(token) {
-        // Prevent multiple concurrent requests
-        if (this._isLoading) {
+    _updateClaudeMenu() {
+        if (this._claude.error) {
+            this._setMenuRowError(this._claudeMenu5h, this._claude.error);
+            this._setMenuRowError(this._claudeMenu7d, this._claude.error);
             return;
         }
+        if (!this._claude.data) return;
+        const d = this._claude.data;
+        this._updateMenuRow(this._claudeMenu5h, d.fiveHour.utilization, d.fiveHour.resetsAt, FIVE_HOUR_MS);
+        this._updateMenuRow(this._claudeMenu7d, d.sevenDay.utilization, d.sevenDay.resetsAt, SEVEN_DAY_MS);
+    }
 
-        this._isLoading = true;
-        const message = Soup.Message.new('GET', API_URL);
-        message.request_headers.append('Authorization', `Bearer ${token}`);
-        message.request_headers.append('anthropic-beta', 'oauth-2025-04-20');
+    // --- Codex provider ---
 
-        this._session.send_and_read_async(
-            message,
-            GLib.PRIORITY_DEFAULT,
-            null,
-            (session, result) => {
-                this._isLoading = false;
+    _refreshCodex() {
+        const codexHome = GLib.getenv('CODEX_HOME') ??
+            GLib.build_filenamev([GLib.get_home_dir(), '.codex']);
+        const path = GLib.build_filenamev([codexHome, 'auth.json']);
 
-                try {
-                    const bytes = session.send_and_read_finish(result);
+        this._loadJsonFile(path, (json) => {
+            const token = json?.tokens?.access_token;
+            const accountId = json?.tokens?.account_id;
+            if (!token || !accountId) {
+                this._setProviderError(this._codex, this._codexPanel, 'No token');
+                this._updateCodexMenu();
+                return;
+            }
+            this._fetchCodex(token, accountId);
+        }, (err) => {
+            this._setProviderError(this._codex, this._codexPanel, '⚠️');
+            this._updateCodexMenu();
+        });
+    }
 
-                    // Handle HTTP errors
-                    if (message.status_code === 401 || message.status_code === 403) {
-                        this._handleAuthError();
-                        return;
-                    }
+    _fetchCodex(token, accountId) {
+        if (this._codex.loading) return;
+        this._codex.loading = true;
 
-                    if (message.status_code !== 200) {
-                        this._handleHttpError(message.status_code);
-                        return;
-                    }
+        const msg = Soup.Message.new('GET', CODEX_API_URL);
+        msg.request_headers.append('Authorization', `Bearer ${token}`);
+        msg.request_headers.append('chatgpt-account-id', accountId);
 
-                    // Parse response
-                    const decoder = new TextDecoder('utf-8');
-                    const responseText = decoder.decode(bytes.get_data());
-                    let data;
+        this._session.send_and_read_async(msg, GLib.PRIORITY_DEFAULT, null, (session, result) => {
+            this._codex.loading = false;
+            try {
+                const bytes = session.send_and_read_finish(result);
 
-                    try {
-                        data = JSON.parse(responseText);
-                    } catch (parseError) {
-                        console.error('Claude Usage: Failed to parse JSON:', parseError.message);
-                        this._handleError('Invalid API response format');
-                        return;
-                    }
-
-                    // Validate response structure
-                    if (!this._validateApiResponse(data)) {
-                        this._handleError('API returned unexpected data structure');
-                        return;
-                    }
-
-                    this._retryAttempt = 0;
-                    this._updateDisplay(data);
-
-                } catch (e) {
-                    console.error('Claude Usage: Network error:', e.message);
-                    this._handleNetworkError(e.message);
+                if (msg.status_code === 401 || msg.status_code === 403) {
+                    this._handleProviderRetry(this._codex, this._codexPanel, '🚨', () => this._refreshCodex());
+                    return;
                 }
+                if (msg.status_code !== 200) {
+                    this._handleProviderRetry(this._codex, this._codexPanel, '⚠️', () => this._refreshCodex());
+                    return;
+                }
+
+                const data = JSON.parse(new TextDecoder().decode(bytes.get_data()));
+                const primary = data?.rate_limit?.primary_window;
+                const secondary = data?.rate_limit?.secondary_window;
+                if (!primary) {
+                    this._setProviderError(this._codex, this._codexPanel, '⚠️');
+                    this._updateCodexMenu();
+                    return;
+                }
+
+                this._codex.retryAttempt = 0;
+                this._codex.error = null;
+                this._codex.data = {
+                    fiveHour: {
+                        utilization: primary.used_percent ?? 0,
+                        resetsAt: new Date(primary.reset_at * 1000).toISOString(),
+                    },
+                    sevenDay: secondary ? {
+                        utilization: secondary.used_percent ?? 0,
+                        resetsAt: new Date(secondary.reset_at * 1000).toISOString(),
+                    } : null,
+                };
+                this._updateCodexPanel();
+                this._updateCodexMenu();
+            } catch (e) {
+                console.error('Codex fetch error:', e.message);
+                this._handleProviderRetry(this._codex, this._codexPanel, '⚠️', () => this._refreshCodex());
             }
-        );
+        });
     }
 
-    _validateApiResponse(data) {
-        // Validate that response has expected structure
-        if (!data || typeof data !== 'object') {
-            return false;
-        }
-
-        // Check for required fields
-        if (!data.five_hour || !data.seven_day) {
-            return false;
-        }
-
-        // Validate utilization values
-        const fiveHourUtil = data.five_hour.utilization;
-        const sevenDayUtil = data.seven_day.utilization;
-
-        if (typeof fiveHourUtil !== 'number' || typeof sevenDayUtil !== 'number') {
-            return false;
-        }
-
-        return true;
+    _updateCodexPanel() {
+        this._updateProviderPanel(this._codex, this._codexPanel);
     }
 
-    _handleAuthError() {
-        if (this._shouldRetry()) {
-            this._label.set_text('⏳');
-            this._scheduleRetry();
+    _updateCodexMenu() {
+        if (this._codex.error) {
+            this._setMenuRowError(this._codexMenu5h, this._codex.error);
+            this._setMenuRowError(this._codexMenu7d, this._codex.error);
             return;
         }
-
-        this._label.set_text('🚨');
-        this._fiveHourPercent.set_text('Auth failed');
-        this._sevenDayPercent.set_text('—');
-    }
-
-    _handleHttpError(statusCode) {
-        if (this._shouldRetry()) {
-            this._scheduleRetry();
+        if (!this._codex.data) return;
+        const d = this._codex.data;
+        this._updateMenuRow(this._codexMenu5h, d.fiveHour.utilization, d.fiveHour.resetsAt, FIVE_HOUR_MS);
+        if (d.sevenDay) {
+            this._codexMenu7d.item.show();
+            this._updateMenuRow(this._codexMenu7d, d.sevenDay.utilization, d.sevenDay.resetsAt, SEVEN_DAY_MS);
         } else {
-            this._label.set_text('⚠️');
-            this._fiveHourPercent.set_text(`HTTP ${statusCode}`);
-            this._sevenDayPercent.set_text('—');
+            this._codexMenu7d.item.hide();
         }
     }
 
-    _handleNetworkError(errorMessage) {
-        if (this._shouldRetry()) {
-            this._scheduleRetry();
-        } else {
-            this._label.set_text('⚠️');
-            this._fiveHourPercent.set_text('Network error');
-            this._sevenDayPercent.set_text('—');
-        }
+    // --- Shared provider logic ---
+
+    _loadJsonFile(path, onSuccess, onError) {
+        const file = Gio.File.new_for_path(path);
+        file.load_contents_async(null, (f, result) => {
+            try {
+                const [success, contents] = f.load_contents_finish(result);
+                if (!success) { onError('File not found'); return; }
+                const json = JSON.parse(new TextDecoder().decode(contents));
+                onSuccess(json);
+            } catch (e) {
+                onError(e.message);
+            }
+        });
     }
 
-    _handleError(errorMessage) {
-        this._label.set_text('⚠️');
-        this._fiveHourPercent.set_text(errorMessage);
-        this._sevenDayPercent.set_text('—');
+    _setProviderError(provider, panel, emoji) {
+        provider.error = emoji;
+        provider.data = null;
+        panel.progressBg.hide();
+        panel.marginLabel.hide();
+        panel.errorLabel.set_text(emoji);
+        panel.errorLabel.show();
     }
 
-    _shouldRetry() {
-        return this._retryAttempt < MAX_RETRY_ATTEMPTS;
-    }
-
-    _scheduleRetry() {
-        if (this._retryAttempt >= MAX_RETRY_ATTEMPTS) {
-            return;
-        }
-
-        const delay = RETRY_DELAYS[this._retryAttempt];
-        this._label.set_text('⏳');
-
-        GLib.timeout_add_seconds(
-            GLib.PRIORITY_DEFAULT,
-            delay,
-            () => {
-                this._retryAttempt++;
-                this._refreshUsage();
+    _handleProviderRetry(provider, panel, emoji, retryFn) {
+        if (provider.retryAttempt < MAX_RETRY_ATTEMPTS) {
+            const delay = RETRY_DELAYS[provider.retryAttempt];
+            panel.progressBg.hide();
+            panel.marginLabel.hide();
+            panel.errorLabel.set_text('⏳');
+            panel.errorLabel.show();
+            GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, delay, () => {
+                provider.retryAttempt++;
+                retryFn();
                 return GLib.SOURCE_REMOVE;
-            }
-        );
-    }
-
-    _updateDisplay(data) {
-        const fiveHour = data.five_hour?.utilization ?? 0;
-        const sevenDay = data.seven_day?.utilization ?? 0;
-
-        const FIVE_HOUR_MS = 5 * 3600000;
-        const SEVEN_DAY_MS = 7 * 86400000;
-
-        // Compute pace and margin for both metrics
-        let fiveHourMargin = null;
-        let fiveHourWillHit = false;
-        if (data.five_hour?.resets_at) {
-            const pace = this._computePace(fiveHour, data.five_hour.resets_at, FIVE_HOUR_MS);
-            fiveHourMargin = { marginMs: -(pace.delta / 100) * FIVE_HOUR_MS, delta: pace.delta };
-            fiveHourWillHit = fiveHourMargin.marginMs < 0;
-        }
-
-        let sevenDayMargin = null;
-        let sevenDayWillHit = false;
-        if (data.seven_day?.resets_at) {
-            const pace = this._computePace(sevenDay, data.seven_day.resets_at, SEVEN_DAY_MS);
-            sevenDayMargin = { marginMs: -(pace.delta / 100) * SEVEN_DAY_MS, delta: pace.delta };
-            sevenDayWillHit = sevenDayMargin.marginMs < 0;
-        }
-
-        // Panel: pick which metric's margin to show
-        // - Any will-hit: largest negative margin (worst overshoot)
-        // - All spare: smallest positive margin (tightest bottleneck)
-        let panelUsage, panelMargin;
-        if (fiveHourWillHit || sevenDayWillHit) {
-            // Pick the worst overshoot (most negative marginMs)
-            const fiveMs = fiveHourWillHit ? fiveHourMargin.marginMs : 0;
-            const sevenMs = sevenDayWillHit ? sevenDayMargin.marginMs : 0;
-            if (fiveMs <= sevenMs) {
-                panelUsage = fiveHour;
-                panelMargin = fiveHourMargin;
-            } else {
-                panelUsage = sevenDay;
-                panelMargin = sevenDayMargin;
-            }
+            });
         } else {
-            // Pick the tightest spare (smallest positive marginMs)
-            const fiveMs = fiveHourMargin?.marginMs ?? Infinity;
-            const sevenMs = sevenDayMargin?.marginMs ?? Infinity;
-            if (fiveMs <= sevenMs) {
-                panelUsage = fiveHour;
-                panelMargin = fiveHourMargin;
-            } else {
-                panelUsage = sevenDay;
-                panelMargin = sevenDayMargin;
-            }
+            this._setProviderError(provider, panel, emoji);
         }
-
-        this._label.set_text('');
-
-        // Panel margin label: colored +Xh Ym or -Xh Ym
-        this._updatePanelMarginLabel(panelMargin);
-
-        // Panel progress bar
-        this._updatePanelProgressBar(panelUsage);
-
-        // Popup: 5-hour section
-        this._fiveHourPercent.set_text(`${fiveHour.toFixed(1)}%`);
-        this._updateProgressBar(this._fiveHourProgressBar, fiveHour);
-        this._updateMenuMarginLabel(this._fiveHourMarginLabel, fiveHourMargin);
-
-        if (data.five_hour?.resets_at) {
-            this._fiveHourResetLabel.set_text(`Resets in ${this._formatResetTime(data.five_hour.resets_at)}`);
-        }
-
-        // Popup: 7-day section
-        this._sevenDayPercent.set_text(`${sevenDay.toFixed(1)}%`);
-        this._updateProgressBar(this._sevenDayProgressBar, sevenDay);
-        this._updateMenuMarginLabel(this._sevenDayMarginLabel, sevenDayMargin);
-
-        if (data.seven_day?.resets_at) {
-            this._sevenDayResetLabel.set_text(`Resets in ${this._formatResetTime(data.seven_day.resets_at)}`);
-        }
-
     }
 
-    _updatePanelMarginLabel(margin) {
-        this._marginLabel.remove_style_class_name('claude-margin-ok');
-        this._marginLabel.remove_style_class_name('claude-margin-over');
+    _updateProviderPanel(provider, panel) {
+        if (provider.error || !provider.data) return;
 
-        if (!margin || Math.abs(margin.delta) < 3) {
-            this._marginLabel.set_text('');
-            this._label.remove_style_class_name('claude-usage-label-warn');
+        panel.errorLabel.hide();
+        panel.progressBg.show();
+        panel.marginLabel.show();
+
+        const d = provider.data;
+        const margins = [];
+
+        if (d.fiveHour) {
+            const pace = this._computePace(d.fiveHour.utilization, d.fiveHour.resetsAt, FIVE_HOUR_MS);
+            margins.push({
+                usage: d.fiveHour.utilization,
+                marginMs: -(pace.delta / 100) * FIVE_HOUR_MS,
+                delta: pace.delta,
+            });
+        }
+        if (d.sevenDay) {
+            const pace = this._computePace(d.sevenDay.utilization, d.sevenDay.resetsAt, SEVEN_DAY_MS);
+            margins.push({
+                usage: d.sevenDay.utilization,
+                marginMs: -(pace.delta / 100) * SEVEN_DAY_MS,
+                delta: pace.delta,
+            });
+        }
+
+        // Pick worst margin for panel display
+        const willHit = margins.filter(m => m.marginMs < 0);
+        let picked;
+        if (willHit.length > 0) {
+            picked = willHit.reduce((a, b) => a.marginMs < b.marginMs ? a : b);
+        } else if (margins.length > 0) {
+            picked = margins.reduce((a, b) => a.marginMs < b.marginMs ? a : b);
+        }
+
+        if (!picked) return;
+
+        // Panel bar: always white, just set width
+        const width = Math.round((Math.min(100, Math.max(0, picked.usage)) / 100) * PANEL_BAR_WIDTH);
+        panel.progressBar.set_width(width);
+
+        // Margin label: colored only when relevant (usage > 3% delta)
+        panel.marginLabel.remove_style_class_name('margin-ok');
+        panel.marginLabel.remove_style_class_name('margin-over');
+
+        if (Math.abs(picked.delta) < 3) {
+            panel.marginLabel.set_text('');
+        } else {
+            const absMs = Math.abs(picked.marginMs);
+            const formatted = this._formatDuration(absMs);
+            if (picked.marginMs > 0) {
+                panel.marginLabel.set_text(`-${formatted}`);
+                panel.marginLabel.add_style_class_name('margin-ok');
+            } else {
+                panel.marginLabel.set_text(`+${formatted}`);
+                panel.marginLabel.add_style_class_name('margin-over');
+            }
+        }
+    }
+
+    // --- Menu row updates ---
+
+    _setMenuRowError(row, emoji) {
+        row.headerLabel.set_text(`${row.windowLabel} : ${emoji}`);
+        row.progressBg.hide();
+        row.resetLabel.set_text('');
+        row.marginLabel.set_text('');
+    }
+
+    _updateMenuRow(row, utilization, resetsAt, windowMs) {
+        row.headerLabel.set_text(`${row.windowLabel} : ${Math.round(utilization)}%`);
+        row.progressBg.show();
+
+        // Progress bar
+        const bar = row.progressBar;
+        bar._usage = utilization;
+        this._syncMenuBarWidth(bar);
+
+        bar.remove_style_class_name('usage-low');
+        bar.remove_style_class_name('usage-medium');
+        bar.remove_style_class_name('usage-high');
+        bar.remove_style_class_name('usage-critical');
+        if (utilization >= 90) bar.add_style_class_name('usage-critical');
+        else if (utilization >= 70) bar.add_style_class_name('usage-high');
+        else if (utilization >= 40) bar.add_style_class_name('usage-medium');
+        else bar.add_style_class_name('usage-low');
+
+        // Reset label
+        if (resetsAt) {
+            row.resetLabel.set_text(`Resets in ${this._formatResetTime(resetsAt)}`);
+        } else {
+            row.resetLabel.set_text('');
+        }
+
+        // Margin label
+        row.marginLabel.remove_style_class_name('menu-margin-ok');
+        row.marginLabel.remove_style_class_name('menu-margin-over');
+        row.marginLabel.remove_style_class_name('menu-margin-neutral');
+
+        if (!resetsAt) {
+            row.marginLabel.set_text('');
             return;
         }
 
-        const absMs = Math.abs(margin.marginMs);
-        const formatted = this._formatDuration(absMs);
-
-        if (margin.marginMs > 0) {
-            this._marginLabel.set_text(`-${formatted}`);
-            this._marginLabel.add_style_class_name('claude-margin-ok');
-            this._label.remove_style_class_name('claude-usage-label-warn');
+        const pace = this._computePace(utilization, resetsAt, windowMs);
+        if (Math.abs(pace.delta) < 3) {
+            row.marginLabel.set_text('On pace');
+            row.marginLabel.add_style_class_name('menu-margin-neutral');
         } else {
-            this._marginLabel.set_text(`+${formatted}`);
-            this._marginLabel.add_style_class_name('claude-margin-over');
-            this._label.add_style_class_name('claude-usage-label-warn');
+            const marginMs = -(pace.delta / 100) * windowMs;
+            const formatted = this._formatDuration(Math.abs(marginMs));
+            if (marginMs > 0) {
+                row.marginLabel.set_text(`${formatted} to spare`);
+                row.marginLabel.add_style_class_name('menu-margin-ok');
+            } else {
+                row.marginLabel.set_text(`▲ ${formatted} over`);
+                row.marginLabel.add_style_class_name('menu-margin-over');
+            }
         }
     }
 
-    _updateMenuMarginLabel(label, margin) {
-        label.remove_style_class_name('claude-menu-margin-ok');
-        label.remove_style_class_name('claude-menu-margin-over');
-        label.remove_style_class_name('claude-menu-margin-neutral');
-
-        if (!margin || Math.abs(margin.delta) < 3) {
-            label.set_text('On pace');
-            label.add_style_class_name('claude-menu-margin-neutral');
-            return;
-        }
-
-        const absMs = Math.abs(margin.marginMs);
-        const formatted = this._formatDuration(absMs);
-
-        if (margin.marginMs > 0) {
-            label.set_text(`${formatted} to spare`);
-            label.add_style_class_name('claude-menu-margin-ok');
-        } else {
-            label.set_text(`\u25B2 ${formatted} over budget`);
-            label.add_style_class_name('claude-menu-margin-over');
-        }
-    }
-
-    _updatePanelProgressBar(usage) {
-        const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * PANEL_PROGRESS_BAR_WIDTH);
-        this._panelProgressBar.set_width(width);
-
-        this._panelProgressBar.remove_style_class_name('usage-low');
-        this._panelProgressBar.remove_style_class_name('usage-medium');
-        this._panelProgressBar.remove_style_class_name('usage-high');
-        this._panelProgressBar.remove_style_class_name('usage-critical');
-
-        if (usage >= 90) {
-            this._panelProgressBar.add_style_class_name('usage-critical');
-        } else if (usage >= 70) {
-            this._panelProgressBar.add_style_class_name('usage-high');
-        } else if (usage >= 40) {
-            this._panelProgressBar.add_style_class_name('usage-medium');
-        } else {
-            this._panelProgressBar.add_style_class_name('usage-low');
-        }
-    }
-
-    _updateProgressBar(progressBar, usage) {
-        progressBar._usage = usage;
-        this._syncProgressBarToAllocation(progressBar);
-
-        // Update color class
-        progressBar.remove_style_class_name('usage-low');
-        progressBar.remove_style_class_name('usage-medium');
-        progressBar.remove_style_class_name('usage-high');
-        progressBar.remove_style_class_name('usage-critical');
-
-        if (usage >= 90) {
-            progressBar.add_style_class_name('usage-critical');
-        } else if (usage >= 70) {
-            progressBar.add_style_class_name('usage-high');
-        } else if (usage >= 40) {
-            progressBar.add_style_class_name('usage-medium');
-        } else {
-            progressBar.add_style_class_name('usage-low');
-        }
-    }
-
-    _syncProgressBarToAllocation(progressBar) {
-        const usage = progressBar._usage;
-        if (usage === undefined) return;
-
-        const parent = progressBar.get_parent();
-        if (!parent) return;
-
-        let bgWidth = MENU_PROGRESS_BAR_WIDTH;
-        const alloc = parent.get_allocation_box();
-        const allocWidth = alloc.get_width();
-        if (allocWidth > 0) bgWidth = allocWidth;
-
-        const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * bgWidth);
-        progressBar.set_width(width);
-    }
+    // --- Utilities ---
 
     _computePace(utilization, resetsAt, windowMs) {
         const now = Date.now();
         const resetTime = new Date(resetsAt).getTime();
         const remaining = resetTime - now;
         const elapsed = windowMs - remaining;
-
-        // Clamp elapsed to [0, windowMs]
         const elapsedClamped = Math.max(0, Math.min(elapsed, windowMs));
         const idealPace = (elapsedClamped / windowMs) * 100;
-        const delta = utilization - idealPace;
-
-        return { delta };
+        return { delta: utilization - idealPace };
     }
 
     _formatDuration(ms) {
         if (ms <= 0) return 'now';
-        const diffMins = Math.floor(ms / 60000);
-        const diffHours = Math.floor(diffMins / 60);
-        const diffDays = Math.floor(diffHours / 24);
-        if (diffDays > 0) return `${diffDays}d ${diffHours % 24}h`;
-        if (diffHours > 0) return `${diffHours}h ${diffMins % 60}m`;
-        return `${diffMins}m`;
+        const mins = Math.floor(ms / 60000);
+        const hours = Math.floor(mins / 60);
+        const days = Math.floor(hours / 24);
+        if (days > 0) return `${days}d ${hours % 24}h`;
+        if (hours > 0) return `${hours}h ${mins % 60}m`;
+        return `${mins}m`;
     }
 
     _formatResetTime(isoString) {
@@ -685,20 +635,15 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     destroy() {
         this._stopTimer();
 
-        // Clean up session
         if (this._session) {
             this._session.abort();
             this._session = null;
         }
 
-        // Clean up settings connection
         if (this._settingsChangedId) {
             this._settings.disconnect(this._settingsChangedId);
             this._settingsChangedId = null;
         }
-
-        this._retryAttempt = 0;
-        this._isLoading = false;
 
         super.destroy();
     }
@@ -707,7 +652,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
 export default class ClaudeUsageExtension extends Extension {
     enable() {
         this._settings = this.getSettings();
-        this._indicator = new ClaudeUsageIndicator(
+        this._indicator = new UsageIndicator(
             this.path,
             this._settings,
             () => this.openPreferences()
