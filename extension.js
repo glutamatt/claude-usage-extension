@@ -59,11 +59,11 @@ function claudeConfig(extensionPath) {
     };
 }
 
-function codexConfig() {
+function codexConfig(extensionPath) {
     return {
         name: 'Codex',
-        iconPath: null,
-        textLabel: 'Cx',
+        iconPath: GLib.build_filenamev([extensionPath, 'codex-icon-22.png']),
+        textLabel: null,
 
         credentialsPath() {
             const dir = GLib.getenv('CODEX_HOME') ??
@@ -119,7 +119,7 @@ class UsageIndicator extends PanelMenu.Button {
         // Build providers from config
         this._providers = [
             this._initProvider(claudeConfig(extensionPath)),
-            this._initProvider(codexConfig()),
+            this._initProvider(codexConfig(extensionPath)),
         ];
 
         // Add a left margin to every provider after the first
