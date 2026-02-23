@@ -388,6 +388,7 @@ class UsageIndicator extends PanelMenu.Button {
                 p.state.retryAttempt = 0;
                 p.state.error = null;
                 p.state.data = data;
+                this._computeMargins(p);
                 this._updatePanel(p);
                 this._updateMenu(p);
             } catch (e) {
@@ -428,65 +429,82 @@ class UsageIndicator extends PanelMenu.Button {
         }
     }
 
+    // --- Compute margins once, reuse everywhere ---
+
+    _computeMargins(p) {
+        const d = p.state.data;
+        if (!d) { p.state.margins = null; return; }
+
+        const now = Date.now();
+        const windows = [];
+        if (d.fiveHour) {
+            const m = this._marginForWindow(d.fiveHour.utilization, d.fiveHour.resetsAt, FIVE_HOUR_MS, now);
+            windows.push({ key: 'fiveHour', ...m });
+        }
+        if (d.sevenDay) {
+            const m = this._marginForWindow(d.sevenDay.utilization, d.sevenDay.resetsAt, SEVEN_DAY_MS, now);
+            windows.push({ key: 'sevenDay', ...m });
+        }
+
+        const willHit = windows.filter(m => m.marginMs < 0);
+        const picked = willHit.length > 0
+            ? willHit.reduce((a, b) => a.marginMs < b.marginMs ? a : b)
+            : windows.reduce((a, b) => a.marginMs < b.marginMs ? a : b);
+
+        p.state.margins = { windows, picked };
+    }
+
+    _marginForWindow(utilization, resetsAt, windowMs, now) {
+        const resetTime = new Date(resetsAt).getTime();
+        const elapsed = Math.max(0, Math.min(windowMs - (resetTime - now), windowMs));
+        const delta = utilization - (elapsed / windowMs) * 100;
+        const marginMs = -(delta / 100) * windowMs;
+        return { utilization, resetsAt, marginMs, delta };
+    }
+
     // --- Panel update ---
 
     _updatePanel(p) {
         const panel = p.panel;
-        const d = p.state.data;
-        if (!d) return;
+        const m = p.state.margins;
+        if (!m) return;
 
         panel.errorLabel.hide();
         panel.gauge.show();
         panel.marginLabel.show();
 
-        // Compute margin for each window, pick worst
-        const margins = [];
-        if (d.fiveHour) {
-            const pace = this._computePace(d.fiveHour.utilization, d.fiveHour.resetsAt, FIVE_HOUR_MS);
-            margins.push({ usage: d.fiveHour.utilization, marginMs: -(pace.delta / 100) * FIVE_HOUR_MS, delta: pace.delta });
-        }
-        if (d.sevenDay) {
-            const pace = this._computePace(d.sevenDay.utilization, d.sevenDay.resetsAt, SEVEN_DAY_MS);
-            margins.push({ usage: d.sevenDay.utilization, marginMs: -(pace.delta / 100) * SEVEN_DAY_MS, delta: pace.delta });
-        }
-
-        const willHit = margins.filter(m => m.marginMs < 0);
-        const picked = willHit.length > 0
-            ? willHit.reduce((a, b) => a.marginMs < b.marginMs ? a : b)
-            : margins.reduce((a, b) => a.marginMs < b.marginMs ? a : b);
+        const picked = m.picked;
         if (!picked) return;
 
-        panel.gauge._usage = picked.usage;
+        panel.gauge._usage = picked.utilization;
         panel.gauge.queue_repaint();
 
         panel.marginLabel.remove_style_class_name('margin-ok');
         panel.marginLabel.remove_style_class_name('margin-over');
 
-        if (Math.abs(picked.delta) < 3) {
-            panel.marginLabel.set_text('');
+        const formatted = this._formatDuration(Math.abs(picked.marginMs));
+        if (picked.marginMs > 0) {
+            panel.marginLabel.set_text(`-${formatted}`);
+            panel.marginLabel.add_style_class_name('margin-ok');
         } else {
-            const formatted = this._formatDuration(Math.abs(picked.marginMs));
-            if (picked.marginMs > 0) {
-                panel.marginLabel.set_text(`-${formatted}`);
-                panel.marginLabel.add_style_class_name('margin-ok');
-            } else {
-                panel.marginLabel.set_text(`+${formatted}`);
-                panel.marginLabel.add_style_class_name('margin-over');
-            }
+            panel.marginLabel.set_text(`+${formatted}`);
+            panel.marginLabel.add_style_class_name('margin-over');
         }
     }
 
     // --- Menu update ---
 
     _updateMenu(p) {
-        const d = p.state.data;
-        if (!d) return;
+        const m = p.state.margins;
+        if (!m) return;
 
-        this._updateMenuRow(p.menu.fiveHour, d.fiveHour.utilization, d.fiveHour.resetsAt, FIVE_HOUR_MS);
+        const fiveHour = m.windows.find(w => w.key === 'fiveHour');
+        const sevenDay = m.windows.find(w => w.key === 'sevenDay');
 
-        if (d.sevenDay) {
+        if (fiveHour) this._updateMenuRow(p.menu.fiveHour, fiveHour);
+        if (sevenDay) {
             p.menu.sevenDay.item.show();
-            this._updateMenuRow(p.menu.sevenDay, d.sevenDay.utilization, d.sevenDay.resetsAt, SEVEN_DAY_MS);
+            this._updateMenuRow(p.menu.sevenDay, sevenDay);
         } else {
             p.menu.sevenDay.item.hide();
         }
@@ -499,7 +517,9 @@ class UsageIndicator extends PanelMenu.Button {
         row.marginLabel.set_text('');
     }
 
-    _updateMenuRow(row, utilization, resetsAt, windowMs) {
+    _updateMenuRow(row, margin) {
+        const { utilization, resetsAt, marginMs } = margin;
+
         row.headerLabel.set_text(`${row.windowLabel} : ${Math.round(utilization)}%`);
         row.progressBg.show();
 
@@ -524,30 +544,17 @@ class UsageIndicator extends PanelMenu.Button {
 
         if (!resetsAt) { row.marginLabel.set_text(''); return; }
 
-        const pace = this._computePace(utilization, resetsAt, windowMs);
-        if (Math.abs(pace.delta) < 3) {
-            row.marginLabel.set_text('On pace');
-            row.marginLabel.add_style_class_name('menu-margin-neutral');
+        const formatted = this._formatDuration(Math.abs(marginMs));
+        if (marginMs > 0) {
+            row.marginLabel.set_text(`${formatted} to spare`);
+            row.marginLabel.add_style_class_name('menu-margin-ok');
         } else {
-            const marginMs = -(pace.delta / 100) * windowMs;
-            const formatted = this._formatDuration(Math.abs(marginMs));
-            if (marginMs > 0) {
-                row.marginLabel.set_text(`${formatted} to spare`);
-                row.marginLabel.add_style_class_name('menu-margin-ok');
-            } else {
-                row.marginLabel.set_text(`▲ ${formatted} over`);
-                row.marginLabel.add_style_class_name('menu-margin-over');
-            }
+            row.marginLabel.set_text(`▲ ${formatted} over`);
+            row.marginLabel.add_style_class_name('menu-margin-over');
         }
     }
 
     // --- Utilities ---
-
-    _computePace(utilization, resetsAt, windowMs) {
-        const resetTime = new Date(resetsAt).getTime();
-        const elapsed = Math.max(0, Math.min(windowMs - (resetTime - Date.now()), windowMs));
-        return { delta: utilization - (elapsed / windowMs) * 100 };
-    }
 
     _formatDuration(ms) {
         if (ms <= 0) return 'now';
