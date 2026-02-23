@@ -11,7 +11,7 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const PANEL_BAR_WIDTH = 50;
+const PANEL_BAR_HEIGHT = 18;
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_DELAYS = [5, 10, 20];
 const FIVE_HOUR_MS = 5 * 3600000;
@@ -187,7 +187,10 @@ class UsageIndicator extends PanelMenu.Button {
             style_class: 'panel-bar-bg',
             y_align: Clutter.ActorAlign.CENTER,
         });
-        const progressBar = new St.Widget({ style_class: 'panel-bar-fill' });
+        const progressBar = new St.Widget({
+            style_class: 'panel-bar-fill',
+            y_align: Clutter.ActorAlign.END,
+        });
         progressBg.add_child(progressBar);
         container.add_child(progressBg);
 
@@ -428,8 +431,8 @@ class UsageIndicator extends PanelMenu.Button {
             : margins.reduce((a, b) => a.marginMs < b.marginMs ? a : b);
         if (!picked) return;
 
-        panel.progressBar.set_width(
-            Math.round((Math.min(100, Math.max(0, picked.usage)) / 100) * PANEL_BAR_WIDTH)
+        panel.progressBar.set_height(
+            Math.round((Math.min(100, Math.max(0, picked.usage)) / 100) * PANEL_BAR_HEIGHT)
         );
 
         panel.marginLabel.remove_style_class_name('margin-ok');
