@@ -313,6 +313,10 @@ class UsageIndicator extends PanelMenu.Button {
             this._refreshAll();
             return GLib.SOURCE_CONTINUE;
         });
+        this._tickId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 30, () => {
+            this._tickAll();
+            return GLib.SOURCE_CONTINUE;
+        });
     }
 
     _stopTimer() {
@@ -320,11 +324,24 @@ class UsageIndicator extends PanelMenu.Button {
             GLib.source_remove(this._timerId);
             this._timerId = null;
         }
+        if (this._tickId) {
+            GLib.source_remove(this._tickId);
+            this._tickId = null;
+        }
     }
 
     _restartTimer() {
         this._stopTimer();
         this._startTimer();
+    }
+
+    _tickAll() {
+        for (const p of this._providers) {
+            if (!p.state.data) continue;
+            this._computeMargins(p);
+            this._updatePanel(p);
+            this._updateMenu(p);
+        }
     }
 
     _refreshAll() {
