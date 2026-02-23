@@ -11,20 +11,6 @@
     margin-right: 4px;
 }
 
-.panel-bar-bg {
-    background-color: rgba(255, 255, 255, 0.2);
-    border-radius: 3px;
-    width: 5px;
-    height: 18px;
-}
-
-.panel-bar-fill {
-    width: 5px;
-    border-radius: 3px;
-    background-color: #ffffff;
-    transition: height 300ms ease-out;
-}
-
 .panel-margin {
     font-size: 12px;
     font-weight: bold;

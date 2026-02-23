@@ -11,7 +11,8 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const PANEL_BAR_HEIGHT = 18;
+const GAUGE_SIZE = 18;
+const GAUGE_LINE = 2.5;
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_DELAYS = [5, 10, 20];
 const FIVE_HOUR_MS = 5 * 3600000;
@@ -183,16 +184,14 @@ class UsageIndicator extends PanelMenu.Button {
             }));
         }
 
-        const progressBg = new St.Widget({
-            style_class: 'panel-bar-bg',
+        const gauge = new St.DrawingArea({
+            width: GAUGE_SIZE,
+            height: GAUGE_SIZE,
             y_align: Clutter.ActorAlign.CENTER,
         });
-        const progressBar = new St.Widget({
-            style_class: 'panel-bar-fill',
-            y_align: Clutter.ActorAlign.END,
-        });
-        progressBg.add_child(progressBar);
-        container.add_child(progressBg);
+        gauge._usage = 0;
+        gauge.connect('repaint', () => this._drawGauge(gauge));
+        container.add_child(gauge);
 
         const marginLabel = new St.Label({
             text: '',
@@ -209,7 +208,7 @@ class UsageIndicator extends PanelMenu.Button {
         errorLabel.hide();
         container.add_child(errorLabel);
 
-        return { container, progressBg, progressBar, marginLabel, errorLabel };
+        return { container, gauge, marginLabel, errorLabel };
     }
 
     _createMenuRow(iconPath, textLabel, windowLabel) {
@@ -268,6 +267,32 @@ class UsageIndicator extends PanelMenu.Button {
         item.add_child(box);
 
         return { item, headerLabel, progressBg, progressBar, resetLabel, marginLabel, windowLabel };
+    }
+
+    _drawGauge(gauge) {
+        const cr = gauge.get_context();
+        const [w, h] = gauge.get_surface_size();
+        const cx = w / 2, cy = h / 2;
+        const radius = Math.min(w, h) / 2 - GAUGE_LINE / 2;
+
+        cr.setLineWidth(GAUGE_LINE);
+        cr.setLineCap(1); // ROUND
+
+        // Background ring
+        cr.setSourceRGBA(1, 1, 1, 0.2);
+        cr.arc(cx, cy, radius, 0, 2 * Math.PI);
+        cr.stroke();
+
+        // Usage arc (from 12 o'clock, clockwise)
+        const usage = Math.min(100, Math.max(0, gauge._usage));
+        if (usage > 0) {
+            cr.setSourceRGBA(1, 1, 1, 1);
+            const start = -Math.PI / 2;
+            cr.arc(cx, cy, radius, start, start + (usage / 100) * 2 * Math.PI);
+            cr.stroke();
+        }
+
+        cr.$dispose();
     }
 
     _syncMenuBarWidth(bar) {
@@ -378,7 +403,7 @@ class UsageIndicator extends PanelMenu.Button {
         p.state.error = emoji;
         p.state.data = null;
         const panel = p.panel;
-        panel.progressBg.hide();
+        panel.gauge.hide();
         panel.marginLabel.hide();
         panel.errorLabel.set_text(emoji);
         panel.errorLabel.show();
@@ -389,7 +414,7 @@ class UsageIndicator extends PanelMenu.Button {
     _retry(p, emoji) {
         if (p.state.retryAttempt < MAX_RETRY_ATTEMPTS) {
             const delay = RETRY_DELAYS[p.state.retryAttempt];
-            p.panel.progressBg.hide();
+            p.panel.gauge.hide();
             p.panel.marginLabel.hide();
             p.panel.errorLabel.set_text('⏳');
             p.panel.errorLabel.show();
@@ -411,7 +436,7 @@ class UsageIndicator extends PanelMenu.Button {
         if (!d) return;
 
         panel.errorLabel.hide();
-        panel.progressBg.show();
+        panel.gauge.show();
         panel.marginLabel.show();
 
         // Compute margin for each window, pick worst
@@ -431,9 +456,8 @@ class UsageIndicator extends PanelMenu.Button {
             : margins.reduce((a, b) => a.marginMs < b.marginMs ? a : b);
         if (!picked) return;
 
-        panel.progressBar.set_height(
-            Math.round((Math.min(100, Math.max(0, picked.usage)) / 100) * PANEL_BAR_HEIGHT)
-        );
+        panel.gauge._usage = picked.usage;
+        panel.gauge.queue_repaint();
 
         panel.marginLabel.remove_style_class_name('margin-ok');
         panel.marginLabel.remove_style_class_name('margin-over');
