@@ -22,10 +22,6 @@
     margin-left: 4px;
 }
 
-.margin-ok {
-    color: #22c55e;
-}
-
 .margin-over {
     color: #f97316;
 }
@@ -94,14 +90,6 @@
     font-weight: bold;
 }
 
-.menu-margin-ok {
-    color: #22c55e;
-}
-
 .menu-margin-over {
     color: #f97316;
-}
-
-.menu-margin-neutral {
-    color: #a0a0a0;
 }

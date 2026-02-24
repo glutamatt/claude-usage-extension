@@ -515,12 +515,10 @@ class UsageIndicator extends PanelMenu.Button {
         console.log(`${TAG} rate: ${ratePerMin.toFixed(4)}%/min (${rateDeltas.length}/${deltas.length} deltas in ${(rateWindowMs / 60000).toFixed(1)}min window, total +${totalIncrease.toFixed(2)}%) remaining=${remaining.toFixed(1)}% resetIn=${(timeToReset / 60000).toFixed(1)}min`);
 
         let marginMs;
-        let hasRate = true;
         if (utilization >= 100) {
             marginMs = -timeToReset;
         } else if (rate <= 0) {
             marginMs = timeToReset;
-            hasRate = false;
         } else {
             marginMs = (remaining / rate) - timeToReset;
         }
@@ -529,7 +527,7 @@ class UsageIndicator extends PanelMenu.Button {
             ? Math.min(100, utilization + rate * timeToReset)
             : utilization;
 
-        return { utilization, resetsAt, marginMs, hasRate, projectedAtReset };
+        return { utilization, resetsAt, marginMs, projectedAtReset };
     }
 
     // --- Panel update ---
@@ -548,18 +546,11 @@ class UsageIndicator extends PanelMenu.Button {
         panel.gauge._usage = picked.utilization;
         panel.gauge.queue_repaint();
 
-        panel.marginLabel.remove_style_class_name('margin-ok');
         panel.marginLabel.remove_style_class_name('margin-over');
-
-        if (!picked.hasRate) {
-            panel.marginLabel.hide();
-            return;
-        }
 
         panel.marginLabel.show();
         if (picked.marginMs > 0) {
             panel.marginLabel.set_text(`→${Math.round(picked.projectedAtReset)}%`);
-            panel.marginLabel.add_style_class_name('margin-ok');
         } else {
             const formatted = this._formatDuration(Math.abs(picked.marginMs));
             panel.marginLabel.set_text(`+${formatted}`);
@@ -598,7 +589,7 @@ class UsageIndicator extends PanelMenu.Button {
     }
 
     _updateMenuRow(row, margin) {
-        const { utilization, resetsAt, marginMs, hasRate } = margin;
+        const { utilization, resetsAt, marginMs } = margin;
 
         row.headerLabel.set_text(`${row.windowLabel} : ${Math.round(utilization)}%`);
         row.progressBg.show();
@@ -618,15 +609,12 @@ class UsageIndicator extends PanelMenu.Button {
 
         row.resetLabel.set_text(resetsAt ? `Resets in ${this._formatResetTime(resetsAt)}` : '');
 
-        row.marginLabel.remove_style_class_name('menu-margin-ok');
         row.marginLabel.remove_style_class_name('menu-margin-over');
-        row.marginLabel.remove_style_class_name('menu-margin-neutral');
 
-        if (!resetsAt || !hasRate) { row.marginLabel.set_text(''); return; }
+        if (!resetsAt) { row.marginLabel.set_text(''); return; }
 
         if (marginMs > 0) {
             row.marginLabel.set_text(`→${Math.round(margin.projectedAtReset)}% at reset`);
-            row.marginLabel.add_style_class_name('menu-margin-ok');
         } else {
             const formatted = this._formatDuration(Math.abs(marginMs));
             row.marginLabel.set_text(`▲ ${formatted} before reset`);
