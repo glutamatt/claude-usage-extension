@@ -515,15 +515,17 @@ class UsageIndicator extends PanelMenu.Button {
         console.log(`${TAG} rate: ${ratePerMin.toFixed(4)}%/min (${rateDeltas.length}/${deltas.length} deltas in ${(rateWindowMs / 60000).toFixed(1)}min window, total +${totalIncrease.toFixed(2)}%) remaining=${remaining.toFixed(1)}% resetIn=${(timeToReset / 60000).toFixed(1)}min`);
 
         let marginMs;
+        let hasRate = true;
         if (utilization >= 100) {
             marginMs = -timeToReset;
         } else if (rate <= 0) {
             marginMs = timeToReset;
+            hasRate = false;
         } else {
             marginMs = (remaining / rate) - timeToReset;
         }
 
-        return { utilization, resetsAt, marginMs };
+        return { utilization, resetsAt, marginMs, hasRate };
     }
 
     // --- Panel update ---
@@ -535,7 +537,6 @@ class UsageIndicator extends PanelMenu.Button {
 
         panel.errorLabel.hide();
         panel.gauge.show();
-        panel.marginLabel.show();
 
         const picked = m.picked;
         if (!picked) return;
@@ -546,6 +547,12 @@ class UsageIndicator extends PanelMenu.Button {
         panel.marginLabel.remove_style_class_name('margin-ok');
         panel.marginLabel.remove_style_class_name('margin-over');
 
+        if (!picked.hasRate) {
+            panel.marginLabel.hide();
+            return;
+        }
+
+        panel.marginLabel.show();
         const formatted = this._formatDuration(Math.abs(picked.marginMs));
         if (picked.marginMs > 0) {
             panel.marginLabel.set_text(`-${formatted}`);
@@ -587,7 +594,7 @@ class UsageIndicator extends PanelMenu.Button {
     }
 
     _updateMenuRow(row, margin) {
-        const { utilization, resetsAt, marginMs } = margin;
+        const { utilization, resetsAt, marginMs, hasRate } = margin;
 
         row.headerLabel.set_text(`${row.windowLabel} : ${Math.round(utilization)}%`);
         row.progressBg.show();
@@ -611,7 +618,7 @@ class UsageIndicator extends PanelMenu.Button {
         row.marginLabel.remove_style_class_name('menu-margin-over');
         row.marginLabel.remove_style_class_name('menu-margin-neutral');
 
-        if (!resetsAt) { row.marginLabel.set_text(''); return; }
+        if (!resetsAt || !hasRate) { row.marginLabel.set_text(''); return; }
 
         const formatted = this._formatDuration(Math.abs(marginMs));
         if (marginMs > 0) {
