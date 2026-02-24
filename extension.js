@@ -15,8 +15,8 @@ const GAUGE_SIZE = 18;
 const GAUGE_LINE = 2.5;
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_DELAYS = [5, 10, 20];
-const FIVE_HOUR_MS = 5 * 3600000;
-const SEVEN_DAY_MS = 7 * 86400000;
+const RATE_WINDOW_MS = 3600000; // 1 hour sliding window for rate estimation
+const TAG = '[ai-usage]'; // TODO: remove debug logs after beta
 
 // --- Provider definitions ---
 // Each provider only specifies what's unique: where to find credentials,
@@ -49,13 +49,12 @@ function claudeConfig(extensionPath) {
         },
 
         parseResponse(data) {
-            if (!data?.five_hour || !data?.seven_day) return null;
-            if (typeof data.five_hour.utilization !== 'number') return null;
-            if (typeof data.seven_day.utilization !== 'number') return null;
-            return {
-                fiveHour: { utilization: data.five_hour.utilization, resetsAt: data.five_hour.resets_at },
-                sevenDay: { utilization: data.seven_day.utilization, resetsAt: data.seven_day.resets_at },
-            };
+            const windows = [];
+            if (data?.five_hour && typeof data.five_hour.utilization === 'number')
+                windows.push({ key: 'five_hour', label: '5-Hour', utilization: data.five_hour.utilization, resetsAt: data.five_hour.resets_at });
+            if (data?.seven_day && typeof data.seven_day.utilization === 'number')
+                windows.push({ key: 'seven_day', label: '7-Day', utilization: data.seven_day.utilization, resetsAt: data.seven_day.resets_at });
+            return windows.length > 0 ? windows : null;
         },
     };
 }
@@ -87,19 +86,14 @@ function codexConfig(extensionPath) {
         },
 
         parseResponse(data) {
+            const windows = [];
             const primary = data?.rate_limit?.primary_window;
-            if (!primary) return null;
+            if (primary)
+                windows.push({ key: 'primary', label: 'Primary', utilization: primary.used_percent ?? 0, resetsAt: new Date(primary.reset_at * 1000).toISOString() });
             const secondary = data?.rate_limit?.secondary_window;
-            return {
-                fiveHour: {
-                    utilization: primary.used_percent ?? 0,
-                    resetsAt: new Date(primary.reset_at * 1000).toISOString(),
-                },
-                sevenDay: secondary ? {
-                    utilization: secondary.used_percent ?? 0,
-                    resetsAt: new Date(secondary.reset_at * 1000).toISOString(),
-                } : null,
-            };
+            if (secondary)
+                windows.push({ key: 'secondary', label: 'Secondary', utilization: secondary.used_percent ?? 0, resetsAt: new Date(secondary.reset_at * 1000).toISOString() });
+            return windows.length > 0 ? windows : null;
         },
     };
 }
@@ -129,10 +123,9 @@ class UsageIndicator extends PanelMenu.Button {
 
         this.add_child(this._box);
 
-        // Popup menu rows + settings
+        // Popup menu sections (rows added dynamically on first data)
         for (const p of this._providers) {
-            this.menu.addMenuItem(p.menu.fiveHour.item);
-            this.menu.addMenuItem(p.menu.sevenDay.item);
+            this.menu.addMenuItem(p.menu.section);
             this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         }
         const settingsItem = new PopupMenu.PopupMenuItem('Settings');
@@ -153,14 +146,16 @@ class UsageIndicator extends PanelMenu.Button {
         const panel = this._createPanelSection(config.iconPath, config.textLabel);
         this._box.add_child(panel.container);
 
+        const menuSection = new PopupMenu.PopupMenuSection();
+
         const provider = {
             config,
-            state: { retryAttempt: 0, loading: false, data: null, error: null },
-            panel,
-            menu: {
-                fiveHour: this._createMenuRow(config.iconPath, config.textLabel, '5-Hour'),
-                sevenDay: this._createMenuRow(config.iconPath, config.textLabel, '7-Day'),
+            state: {
+                retryAttempt: 0, loading: false, data: null, error: null,
+                history: {},
             },
+            panel,
+            menu: { section: menuSection, rows: {} },
         };
         return provider;
     }
@@ -387,23 +382,45 @@ class UsageIndicator extends PanelMenu.Button {
                 const bytes = session.send_and_read_finish(result);
 
                 if (msg.status_code === 401 || msg.status_code === 403) {
+                    console.log(`${TAG} ${p.config.name}: HTTP ${msg.status_code} — auth error, retrying`);
                     this._retry(p, '🚨');
                     return;
                 }
                 if (msg.status_code !== 200) {
+                    console.log(`${TAG} ${p.config.name}: HTTP ${msg.status_code} — retrying`);
                     this._retry(p, '⚠️');
                     return;
                 }
 
                 const raw = JSON.parse(new TextDecoder().decode(bytes.get_data()));
+                console.log(`${TAG} ${p.config.name}: raw response: ${JSON.stringify(raw)}`);
                 const data = p.config.parseResponse(raw);
                 if (!data) {
+                    console.log(`${TAG} ${p.config.name}: parseResponse returned null`);
                     this._setError(p, '⚠️');
                     return;
                 }
+                console.log(`${TAG} ${p.config.name}: parsed windows: ${JSON.stringify(data)}`);
 
                 p.state.retryAttempt = 0;
                 p.state.error = null;
+
+                // Record utilization deltas for rate estimation
+                const now = Date.now();
+                for (const w of data) {
+                    if (!p.state.history[w.key])
+                        p.state.history[w.key] = { prev: null, deltas: [] };
+                    const h = p.state.history[w.key];
+                    if (h.prev !== null) {
+                        const increase = Math.max(0, w.utilization - h.prev);
+                        if (increase > 0) {
+                            h.deltas.push({ ts: now, increase });
+                            console.log(`${TAG} ${p.config.name}/${w.key}: delta +${increase.toFixed(2)}% (prev=${h.prev.toFixed(2)} new=${w.utilization.toFixed(2)})`);
+                        }
+                    }
+                    h.prev = w.utilization;
+                }
+
                 p.state.data = data;
                 this._computeMargins(p);
                 this._updatePanel(p);
@@ -425,8 +442,8 @@ class UsageIndicator extends PanelMenu.Button {
         panel.marginLabel.hide();
         panel.errorLabel.set_text(emoji);
         panel.errorLabel.show();
-        this._setMenuRowError(p.menu.fiveHour, emoji);
-        this._setMenuRowError(p.menu.sevenDay, emoji);
+        for (const row of Object.values(p.menu.rows))
+            this._setMenuRowError(row, emoji);
     }
 
     _retry(p, emoji) {
@@ -454,29 +471,53 @@ class UsageIndicator extends PanelMenu.Button {
 
         const now = Date.now();
         const windows = [];
-        if (d.fiveHour) {
-            const m = this._marginForWindow(d.fiveHour.utilization, d.fiveHour.resetsAt, FIVE_HOUR_MS, now);
-            windows.push({ key: 'fiveHour', ...m });
+        for (const w of d) {
+            const deltas = p.state.history[w.key]?.deltas ?? [];
+            const m = this._marginForWindow(w.utilization, w.resetsAt, deltas, now);
+            windows.push({ key: w.key, label: w.label, ...m });
         }
-        if (d.sevenDay) {
-            const m = this._marginForWindow(d.sevenDay.utilization, d.sevenDay.resetsAt, SEVEN_DAY_MS, now);
-            windows.push({ key: 'sevenDay', ...m });
-        }
+
+        for (const w of windows)
+            console.log(`${TAG} ${p.config.name}/${w.key}: util=${w.utilization.toFixed(1)}% margin=${(w.marginMs / 60000).toFixed(1)}min`);
 
         const willHit = windows.filter(m => m.marginMs < 0);
         const picked = willHit.length > 0
             ? willHit.reduce((a, b) => a.marginMs < b.marginMs ? a : b)
             : windows.reduce((a, b) => a.marginMs < b.marginMs ? a : b);
 
+        console.log(`${TAG} ${p.config.name}: picked=${picked.key} marginMs=${(picked.marginMs / 60000).toFixed(1)}min`);
         p.state.margins = { windows, picked };
     }
 
-    _marginForWindow(utilization, resetsAt, windowMs, now) {
+    _marginForWindow(utilization, resetsAt, deltas, now) {
+        // Prune deltas older than the rate window
+        const cutoff = now - RATE_WINDOW_MS;
+        const before = deltas.length;
+        while (deltas.length > 0 && deltas[0].ts < cutoff)
+            deltas.shift();
+        if (before !== deltas.length)
+            console.log(`${TAG} pruned ${before - deltas.length} stale deltas, ${deltas.length} remaining`);
+
         const resetTime = new Date(resetsAt).getTime();
-        const elapsed = Math.max(0, Math.min(windowMs - (resetTime - now), windowMs));
-        const delta = utilization - (elapsed / windowMs) * 100;
-        const marginMs = -(delta / 100) * windowMs;
-        return { utilization, resetsAt, marginMs, delta };
+        const timeToReset = Math.max(0, resetTime - now);
+        const remaining = 100 - utilization;
+
+        const totalIncrease = deltas.reduce((sum, d) => sum + d.increase, 0);
+        const rate = totalIncrease / RATE_WINDOW_MS; // % per ms
+        const ratePerMin = rate * 60000;
+
+        console.log(`${TAG} rate: ${ratePerMin.toFixed(4)}%/min (${deltas.length} deltas, total +${totalIncrease.toFixed(2)}%) remaining=${remaining.toFixed(1)}% resetIn=${(timeToReset / 60000).toFixed(1)}min`);
+
+        let marginMs;
+        if (utilization >= 100) {
+            marginMs = -timeToReset;
+        } else if (rate <= 0) {
+            marginMs = timeToReset;
+        } else {
+            marginMs = (remaining / rate) - timeToReset;
+        }
+
+        return { utilization, resetsAt, marginMs };
     }
 
     // --- Panel update ---
@@ -515,15 +556,20 @@ class UsageIndicator extends PanelMenu.Button {
         const m = p.state.margins;
         if (!m) return;
 
-        const fiveHour = m.windows.find(w => w.key === 'fiveHour');
-        const sevenDay = m.windows.find(w => w.key === 'sevenDay');
+        const activeKeys = new Set(m.windows.map(w => w.key));
 
-        if (fiveHour) this._updateMenuRow(p.menu.fiveHour, fiveHour);
-        if (sevenDay) {
-            p.menu.sevenDay.item.show();
-            this._updateMenuRow(p.menu.sevenDay, sevenDay);
-        } else {
-            p.menu.sevenDay.item.hide();
+        for (const w of m.windows) {
+            if (!p.menu.rows[w.key]) {
+                const row = this._createMenuRow(p.config.iconPath, p.config.textLabel, w.label);
+                p.menu.rows[w.key] = row;
+                p.menu.section.addMenuItem(row.item);
+            }
+            p.menu.rows[w.key].item.show();
+            this._updateMenuRow(p.menu.rows[w.key], w);
+        }
+
+        for (const [key, row] of Object.entries(p.menu.rows)) {
+            if (!activeKeys.has(key)) row.item.hide();
         }
     }
 
