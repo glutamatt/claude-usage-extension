@@ -87,12 +87,12 @@ function codexConfig(extensionPath) {
 
         parseResponse(data) {
             const windows = [];
-            const primary = data?.rate_limit?.primary_window;
-            if (primary)
-                windows.push({ key: 'primary', label: 'Primary', utilization: primary.used_percent ?? 0, resetsAt: new Date(primary.reset_at * 1000).toISOString() });
-            const secondary = data?.rate_limit?.secondary_window;
-            if (secondary)
-                windows.push({ key: 'secondary', label: 'Secondary', utilization: secondary.used_percent ?? 0, resetsAt: new Date(secondary.reset_at * 1000).toISOString() });
+            const rl = data?.rate_limit?.primary_window;
+            if (rl)
+                windows.push({ key: 'weekly', label: 'Weekly', utilization: rl.used_percent ?? 0, resetsAt: new Date(rl.reset_at * 1000).toISOString() });
+            const cr = data?.code_review_rate_limit?.primary_window;
+            if (cr)
+                windows.push({ key: 'code_review', label: 'Code review', utilization: cr.used_percent ?? 0, resetsAt: new Date(cr.reset_at * 1000).toISOString() });
             return windows.length > 0 ? windows : null;
         },
     };
