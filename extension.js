@@ -15,7 +15,8 @@ const GAUGE_SIZE = 18;
 const GAUGE_LINE = 2.5;
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_DELAYS = [5, 10, 20];
-const RATE_WINDOW_MS = 3600000; // 1 hour sliding window for rate estimation
+const RATE_WINDOW_FRACTION = 0.15; // rate window = 15% of time-to-reset
+const MAX_DELTA_AGE_MS = 7 * 24 * 3600000; // prune deltas older than 7 days
 const TAG = '[ai-usage]'; // TODO: remove debug logs after beta
 
 // --- Provider definitions ---
@@ -490,23 +491,28 @@ class UsageIndicator extends PanelMenu.Button {
     }
 
     _marginForWindow(utilization, resetsAt, deltas, now) {
-        // Prune deltas older than the rate window
-        const cutoff = now - RATE_WINDOW_MS;
+        // Prune deltas older than 7 days (hard cap)
+        const ageCutoff = now - MAX_DELTA_AGE_MS;
         const before = deltas.length;
-        while (deltas.length > 0 && deltas[0].ts < cutoff)
+        while (deltas.length > 0 && deltas[0].ts < ageCutoff)
             deltas.shift();
         if (before !== deltas.length)
-            console.log(`${TAG} pruned ${before - deltas.length} stale deltas, ${deltas.length} remaining`);
+            console.log(`${TAG} pruned ${before - deltas.length} expired deltas, ${deltas.length} remaining`);
 
         const resetTime = new Date(resetsAt).getTime();
         const timeToReset = Math.max(0, resetTime - now);
         const remaining = 100 - utilization;
 
-        const totalIncrease = deltas.reduce((sum, d) => sum + d.increase, 0);
-        const rate = totalIncrease / RATE_WINDOW_MS; // % per ms
+        // Dynamic rate window: fraction of time-to-reset
+        const rateWindowMs = timeToReset * RATE_WINDOW_FRACTION;
+        const rateCutoff = now - rateWindowMs;
+        const rateDeltas = deltas.filter(d => d.ts >= rateCutoff);
+
+        const totalIncrease = rateDeltas.reduce((sum, d) => sum + d.increase, 0);
+        const rate = rateWindowMs > 0 ? totalIncrease / rateWindowMs : 0; // % per ms
         const ratePerMin = rate * 60000;
 
-        console.log(`${TAG} rate: ${ratePerMin.toFixed(4)}%/min (${deltas.length} deltas, total +${totalIncrease.toFixed(2)}%) remaining=${remaining.toFixed(1)}% resetIn=${(timeToReset / 60000).toFixed(1)}min`);
+        console.log(`${TAG} rate: ${ratePerMin.toFixed(4)}%/min (${rateDeltas.length}/${deltas.length} deltas in ${(rateWindowMs / 60000).toFixed(1)}min window, total +${totalIncrease.toFixed(2)}%) remaining=${remaining.toFixed(1)}% resetIn=${(timeToReset / 60000).toFixed(1)}min`);
 
         let marginMs;
         if (utilization >= 100) {
