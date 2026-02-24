@@ -525,7 +525,11 @@ class UsageIndicator extends PanelMenu.Button {
             marginMs = (remaining / rate) - timeToReset;
         }
 
-        return { utilization, resetsAt, marginMs, hasRate };
+        const projectedAtReset = rate > 0
+            ? Math.min(100, utilization + rate * timeToReset)
+            : utilization;
+
+        return { utilization, resetsAt, marginMs, hasRate, projectedAtReset };
     }
 
     // --- Panel update ---
@@ -553,11 +557,11 @@ class UsageIndicator extends PanelMenu.Button {
         }
 
         panel.marginLabel.show();
-        const formatted = this._formatDuration(Math.abs(picked.marginMs));
         if (picked.marginMs > 0) {
-            panel.marginLabel.set_text(`-${formatted}`);
+            panel.marginLabel.set_text(`→${Math.round(picked.projectedAtReset)}%`);
             panel.marginLabel.add_style_class_name('margin-ok');
         } else {
+            const formatted = this._formatDuration(Math.abs(picked.marginMs));
             panel.marginLabel.set_text(`+${formatted}`);
             panel.marginLabel.add_style_class_name('margin-over');
         }
@@ -620,12 +624,12 @@ class UsageIndicator extends PanelMenu.Button {
 
         if (!resetsAt || !hasRate) { row.marginLabel.set_text(''); return; }
 
-        const formatted = this._formatDuration(Math.abs(marginMs));
         if (marginMs > 0) {
-            row.marginLabel.set_text(`${formatted} to spare`);
+            row.marginLabel.set_text(`→${Math.round(margin.projectedAtReset)}% at reset`);
             row.marginLabel.add_style_class_name('menu-margin-ok');
         } else {
-            row.marginLabel.set_text(`▲ ${formatted} over`);
+            const formatted = this._formatDuration(Math.abs(marginMs));
+            row.marginLabel.set_text(`▲ ${formatted} before reset`);
             row.marginLabel.add_style_class_name('menu-margin-over');
         }
     }
