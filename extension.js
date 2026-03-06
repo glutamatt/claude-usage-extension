@@ -18,6 +18,8 @@ const RETRY_DELAYS = [5, 10, 20];
 const RATE_WINDOW_FRACTION = 0.15; // rate window = 15% of time-to-reset
 const MAX_DELTA_AGE_MS = 7 * 24 * 3600000; // prune deltas older than 7 days
 const TAG = '[ai-usage]'; // TODO: remove debug logs after beta
+const ANTHROPIC_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const ANTHROPIC_OAUTH_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token';
 
 // --- Provider definitions ---
 // Each provider only specifies what's unique: where to find credentials,
@@ -39,7 +41,7 @@ function claudeConfig(extensionPath) {
             const token = json?.claudeAiOauth?.accessToken;
             if (!token || typeof token !== 'string' || token.trim() === '')
                 return null;
-            return { token };
+            return { token, refreshToken: json.claudeAiOauth.refreshToken ?? null, _raw: json };
         },
 
         buildRequest(creds) {
@@ -106,6 +108,7 @@ class UsageIndicator extends PanelMenu.Button {
     _init(extensionPath, settings, openPreferences) {
         super._init(0.0, 'AI Usage Indicator');
 
+        this._destroyed = false;
         this._settings = settings;
         this._openPreferences = openPreferences;
         this._session = new Soup.Session();
@@ -347,6 +350,7 @@ class UsageIndicator extends PanelMenu.Button {
     // --- Generic provider fetch pipeline ---
 
     _refreshProvider(p) {
+        p._refreshedThisCycle = false;
         const path = p.config.credentialsPath();
         const file = Gio.File.new_for_path(path);
 
@@ -363,6 +367,7 @@ class UsageIndicator extends PanelMenu.Button {
                     this._setError(p, '⚠️');
                     return;
                 }
+                p._lastCreds = creds;
                 this._fetchProvider(p, creds);
             } catch (e) {
                 console.error(`${p.config.name}: credentials error:`, e.message);
@@ -379,6 +384,7 @@ class UsageIndicator extends PanelMenu.Button {
 
         this._session.send_and_read_async(msg, GLib.PRIORITY_DEFAULT, null, (session, result) => {
             p.state.loading = false;
+            if (this._destroyed) return;
             try {
                 const bytes = session.send_and_read_finish(result);
 
@@ -387,9 +393,15 @@ class UsageIndicator extends PanelMenu.Button {
                     this._retry(p, '🚨');
                     return;
                 }
+                if (msg.status_code === 429 && p._lastCreds?.refreshToken && !p._refreshedThisCycle) {
+                    console.log(`${TAG} ${p.config.name}: HTTP 429 — attempting token refresh bypass`);
+                    p._refreshedThisCycle = true;
+                    p.state.loading = true; // block concurrent fetches during refresh
+                    this._refreshTokenAndRetry(p);
+                    return;
+                }
                 if (msg.status_code === 429) {
-                    console.log(`${TAG} ${p.config.name}: HTTP 429 — rate limited, keeping existing data`);
-                    // Keep existing data visible; don't wipe the display
+                    console.log(`${TAG} ${p.config.name}: HTTP 429 — rate limited, no refresh token available`);
                     return;
                 }
                 if (msg.status_code !== 200) {
@@ -467,6 +479,73 @@ class UsageIndicator extends PanelMenu.Button {
         } else {
             this._setError(p, emoji);
         }
+    }
+
+    // --- OAuth token refresh to bypass per-token rate limits ---
+
+    _refreshTokenAndRetry(p) {
+        const creds = p._lastCreds;
+        if (!creds?.refreshToken) { p.state.loading = false; return; }
+
+        console.log(`${TAG} ${p.config.name}: refreshing OAuth token...`);
+
+        const body = JSON.stringify({
+            grant_type: 'refresh_token',
+            refresh_token: creds.refreshToken,
+            client_id: ANTHROPIC_OAUTH_CLIENT_ID,
+        });
+
+        const msg = Soup.Message.new('POST', ANTHROPIC_OAUTH_TOKEN_URL);
+        msg.set_request_body_from_bytes('application/json',
+            new GLib.Bytes(new TextEncoder().encode(body)));
+
+        this._session.send_and_read_async(msg, GLib.PRIORITY_DEFAULT, null, (session, result) => {
+            p.state.loading = false;
+            if (this._destroyed) return;
+            try {
+                const bytes = session.send_and_read_finish(result);
+                if (msg.status_code !== 200) {
+                    console.error(`${TAG} ${p.config.name}: token refresh failed HTTP ${msg.status_code}`);
+                    return;
+                }
+
+                const tokens = JSON.parse(new TextDecoder().decode(bytes.get_data()));
+                if (!tokens.access_token) {
+                    console.error(`${TAG} ${p.config.name}: token refresh returned no access token`);
+                    return;
+                }
+
+                console.log(`${TAG} ${p.config.name}: token refreshed, saving and retrying`);
+
+                // Update in-memory credentials
+                const raw = creds._raw;
+                raw.claudeAiOauth.accessToken = tokens.access_token;
+                if (tokens.refresh_token)
+                    raw.claudeAiOauth.refreshToken = tokens.refresh_token;
+                if (tokens.expires_in)
+                    raw.claudeAiOauth.expiresAt = Date.now() + tokens.expires_in * 1000;
+
+                // Persist to file (best-effort — don't block retry on write failure)
+                try {
+                    const path = p.config.credentialsPath();
+                    const file = Gio.File.new_for_path(path);
+                    const content = new TextEncoder().encode(JSON.stringify(raw, null, 2));
+                    file.replace_contents(content, null, false,
+                        Gio.FileCreateFlags.REPLACE_DESTINATION, null);
+                } catch (writeErr) {
+                    console.error(`${TAG} ${p.config.name}: failed to save refreshed tokens:`, writeErr.message);
+                }
+
+                // Retry fetch with new token
+                const newCreds = p.config.extractCredentials(raw);
+                if (newCreds) {
+                    p._lastCreds = newCreds;
+                    this._fetchProvider(p, newCreds);
+                }
+            } catch (e) {
+                console.error(`${TAG} ${p.config.name}: token refresh error:`, e.message);
+            }
+        });
     }
 
     // --- Compute margins once, reuse everywhere ---
@@ -645,6 +724,7 @@ class UsageIndicator extends PanelMenu.Button {
     }
 
     destroy() {
+        this._destroyed = true;
         this._stopTimer();
         if (this._session) { this._session.abort(); this._session = null; }
         if (this._settingsChangedId) { this._settings.disconnect(this._settingsChangedId); this._settingsChangedId = null; }
