@@ -387,6 +387,11 @@ class UsageIndicator extends PanelMenu.Button {
                     this._retry(p, '🚨');
                     return;
                 }
+                if (msg.status_code === 429) {
+                    console.log(`${TAG} ${p.config.name}: HTTP 429 — rate limited, keeping existing data`);
+                    // Keep existing data visible; don't wipe the display
+                    return;
+                }
                 if (msg.status_code !== 200) {
                     console.log(`${TAG} ${p.config.name}: HTTP ${msg.status_code} — retrying`);
                     this._retry(p, '⚠️');
