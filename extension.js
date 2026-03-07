@@ -388,9 +388,16 @@ class UsageIndicator extends PanelMenu.Button {
             try {
                 const bytes = session.send_and_read_finish(result);
 
+                if ((msg.status_code === 401 || msg.status_code === 403) && p._lastCreds?.refreshToken && !p._refreshedThisCycle) {
+                    console.log(`${TAG} ${p.config.name}: HTTP ${msg.status_code} — auth error, attempting token refresh`);
+                    p._refreshedThisCycle = true;
+                    p.state.loading = true;
+                    this._refreshTokenAndRetry(p);
+                    return;
+                }
                 if (msg.status_code === 401 || msg.status_code === 403) {
-                    console.log(`${TAG} ${p.config.name}: HTTP ${msg.status_code} — auth error, retrying`);
-                    this._retry(p, '🚨');
+                    console.log(`${TAG} ${p.config.name}: HTTP ${msg.status_code} — auth error, no refresh token`);
+                    this._setError(p, '🚨');
                     return;
                 }
                 if (msg.status_code === 429 && p._lastCreds?.refreshToken && !p._refreshedThisCycle) {
