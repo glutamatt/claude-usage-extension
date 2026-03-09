@@ -46,6 +46,7 @@ function claudeConfig(extensionPath) {
             const msg = Soup.Message.new('GET', 'https://api.anthropic.com/api/oauth/usage');
             msg.request_headers.append('Authorization', `Bearer ${creds.token}`);
             msg.request_headers.append('anthropic-beta', 'oauth-2025-04-20');
+            msg.request_headers.append('User-Agent', 'claude-code/2.1.71');
             return msg;
         },
 
@@ -348,6 +349,10 @@ class UsageIndicator extends PanelMenu.Button {
     // --- Generic provider fetch pipeline ---
 
     _refreshProvider(p) {
+        if (p._cooldownUntil && Date.now() < p._cooldownUntil) {
+            console.log(`${TAG} ${p.config.name}: skipping — cooldown for ${Math.round((p._cooldownUntil - Date.now()) / 1000)}s more`);
+            return;
+        }
         const path = p.config.credentialsPath();
         const file = Gio.File.new_for_path(path);
 
@@ -391,7 +396,11 @@ class UsageIndicator extends PanelMenu.Button {
                     return;
                 }
                 if (msg.status_code === 429) {
-                    console.log(`${TAG} ${p.config.name}: HTTP 429 — rate limited`);
+                    p._backoffCount = (p._backoffCount ?? 0) + 1;
+                    const backoffSecs = Math.min(600, 60 * Math.pow(2, p._backoffCount - 1));
+                    console.log(`${TAG} ${p.config.name}: HTTP 429 — backing off ${backoffSecs}s (attempt ${p._backoffCount})`);
+                    // Skip next N regular refreshes by setting a cooldown timestamp
+                    p._cooldownUntil = Date.now() + backoffSecs * 1000;
                     return;
                 }
                 if (msg.status_code !== 200) {
@@ -412,6 +421,8 @@ class UsageIndicator extends PanelMenu.Button {
 
                 p.state.retryAttempt = 0;
                 p.state.error = null;
+                p._backoffCount = 0;
+                p._cooldownUntil = null;
 
                 // Record utilization deltas for rate estimation
                 const now = Date.now();
@@ -556,7 +567,11 @@ class UsageIndicator extends PanelMenu.Button {
         panel.marginLabel.remove_style_class_name('margin-over');
 
         panel.marginLabel.show();
-        if (picked.marginMs > 0) {
+        const resetPassed = picked.resetsAt && new Date(picked.resetsAt) <= new Date();
+        if (resetPassed) {
+            panel.marginLabel.set_text('stale');
+            panel.marginLabel.add_style_class_name('margin-over');
+        } else if (picked.marginMs > 0) {
             panel.marginLabel.set_text(`→${Math.round(picked.projectedAtReset)}%`);
         } else {
             const formatted = this._formatDuration(Math.abs(picked.marginMs));
@@ -614,6 +629,15 @@ class UsageIndicator extends PanelMenu.Button {
         else if (utilization >= 40) bar.add_style_class_name('usage-medium');
         else bar.add_style_class_name('usage-low');
 
+        const resetPassed = resetsAt && new Date(resetsAt) <= new Date();
+
+        if (resetPassed) {
+            row.resetLabel.set_text('Reset passed — data stale');
+            row.marginLabel.remove_style_class_name('menu-margin-over');
+            row.marginLabel.set_text('likely 0% now');
+            return;
+        }
+
         row.resetLabel.set_text(resetsAt ? `Resets in ${this._formatResetTime(resetsAt)}` : '');
 
         row.marginLabel.remove_style_class_name('menu-margin-over');
@@ -623,7 +647,8 @@ class UsageIndicator extends PanelMenu.Button {
         if (marginMs > 0) {
             row.marginLabel.set_text(`→${Math.round(margin.projectedAtReset)}% at reset`);
         } else {
-            const formatted = this._formatDuration(Math.abs(marginMs));
+            const absDur = Math.abs(marginMs);
+            const formatted = absDur < 60000 ? 'soon' : this._formatDuration(absDur);
             row.marginLabel.set_text(`▲ ${formatted} before reset`);
             row.marginLabel.add_style_class_name('menu-margin-over');
         }
@@ -632,7 +657,7 @@ class UsageIndicator extends PanelMenu.Button {
     // --- Utilities ---
 
     _formatDuration(ms) {
-        if (ms <= 0) return 'now';
+        if (ms < 60000) return '<1m';
         const mins = Math.floor(ms / 60000);
         const hours = Math.floor(mins / 60);
         const days = Math.floor(hours / 24);
@@ -642,7 +667,11 @@ class UsageIndicator extends PanelMenu.Button {
     }
 
     _formatResetTime(iso) {
-        try { return this._formatDuration(new Date(iso) - new Date()); }
+        try {
+            const diff = new Date(iso) - new Date();
+            if (diff <= 0) return 'passed — data stale';
+            return this._formatDuration(diff);
+        }
         catch (e) { return '\u2014'; }
     }
 
