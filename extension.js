@@ -19,6 +19,19 @@ const RATE_WINDOW_FRACTION = 0.15; // rate window = 15% of time-to-reset
 const MAX_DELTA_AGE_MS = 7 * 24 * 3600000; // prune deltas older than 7 days
 const TAG = '[ai-usage]'; // TODO: remove debug logs after beta
 
+function detectClaudeCodeVersion() {
+    try {
+        const link = GLib.build_filenamev([GLib.get_home_dir(), '.local', 'bin', 'claude']);
+        const info = Gio.File.new_for_path(link).query_info('standard::symlink-target', Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
+        const target = info.get_symlink_target();
+        if (target) {
+            const basename = GLib.path_get_basename(target);
+            if (/^\d+\.\d+\.\d+$/.test(basename)) return basename;
+        }
+    } catch (_) {}
+    return '2.1.71'; // fallback
+}
+
 // --- Provider definitions ---
 // Each provider only specifies what's unique: where to find credentials,
 // how to build the HTTP request, and how to normalize the response.
@@ -46,7 +59,7 @@ function claudeConfig(extensionPath) {
             const msg = Soup.Message.new('GET', 'https://api.anthropic.com/api/oauth/usage');
             msg.request_headers.append('Authorization', `Bearer ${creds.token}`);
             msg.request_headers.append('anthropic-beta', 'oauth-2025-04-20');
-            msg.request_headers.append('User-Agent', 'claude-code/2.1.71');
+            msg.request_headers.append('User-Agent', `claude-code/${detectClaudeCodeVersion()}`);
             return msg;
         },
 
