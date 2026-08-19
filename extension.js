@@ -15,8 +15,9 @@ const GAUGE_SIZE = 18;
 const GAUGE_LINE = 2.5;
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_DELAYS = [5, 10, 20];
-const RATE_WINDOW_FRACTION = 0.15; // rate window = 15% of time-to-reset
-const MAX_DELTA_AGE_MS = 7 * 24 * 3600000; // prune deltas older than 7 days
+const RATE_WINDOW_MAX_MS = 60 * 60000; // pace observation window at 0% usage...
+const RATE_WINDOW_MIN_MS = 15 * 60000; // ...shrinking to this at 100%, to react faster near the limit
+const RATE_MIN_SPAN_MS = 5 * 60000; // below this much observed time, don't project
 const TAG = '[ai-usage]';
 
 function detectClaudeCodeVersion() {
@@ -179,6 +180,7 @@ class UsageIndicator extends PanelMenu.Button {
             if (key === 'refresh-interval') this._restartTimer();
         });
 
+        this._loadHistory();
         this._refreshAll();
         this._startTimer();
     }
@@ -192,6 +194,47 @@ class UsageIndicator extends PanelMenu.Button {
         // Without a timeout, a connection opened while the network is down
         // hangs forever and poisons every later request on the session
         return new Soup.Session({ timeout: 15 });
+    }
+
+    // --- History persistence (pace samples survive shell restarts) ---
+
+    _historyPath() {
+        return GLib.build_filenamev([GLib.get_user_cache_dir(), 'claude-usage-history.json']);
+    }
+
+    _loadHistory() {
+        try {
+            const [ok, bytes] = GLib.file_get_contents(this._historyPath());
+            if (!ok) return;
+            const saved = JSON.parse(new TextDecoder().decode(bytes));
+            const cutoff = Date.now() - RATE_WINDOW_MAX_MS;
+            for (const p of this._providers) {
+                const windows = saved[p.config.name];
+                if (!windows) continue;
+                for (const [key, samples] of Object.entries(windows)) {
+                    if (!Array.isArray(samples)) continue;
+                    const valid = samples.filter(s =>
+                        typeof s?.ts === 'number' && typeof s?.util === 'number' && s.ts >= cutoff);
+                    if (valid.length > 0)
+                        p.state.history[key] = { samples: valid };
+                }
+            }
+        } catch (_) {
+            // Missing or corrupt cache: start fresh
+        }
+    }
+
+    _saveHistory() {
+        const out = {};
+        for (const p of this._providers) {
+            out[p.config.name] = Object.fromEntries(
+                Object.entries(p.state.history).map(([k, h]) => [k, h.samples]));
+        }
+        try {
+            GLib.file_set_contents(this._historyPath(), JSON.stringify(out));
+        } catch (e) {
+            console.error('failed to save usage history:', e.message);
+        }
     }
 
     // --- Provider init ---
@@ -479,21 +522,23 @@ class UsageIndicator extends PanelMenu.Button {
                 p._backoffCount = 0;
                 p._cooldownUntil = null;
 
-                // Record utilization deltas for rate estimation
+                // Record utilization samples for pace estimation
                 const now = Date.now();
                 for (const w of data) {
                     if (!p.state.history[w.key])
-                        p.state.history[w.key] = { prev: null, deltas: [] };
+                        p.state.history[w.key] = { samples: [] };
                     const h = p.state.history[w.key];
-                    if (h.prev !== null) {
-                        const increase = Math.max(0, w.utilization - h.prev);
-                        if (increase > 0) {
-                            h.deltas.push({ ts: now, increase });
-                            this._log(`${p.config.name}/${w.key}: delta +${increase.toFixed(2)}% (prev=${h.prev.toFixed(2)} new=${w.utilization.toFixed(2)})`);
-                        }
+                    const last = h.samples[h.samples.length - 1];
+                    if (last && w.utilization < last.util) {
+                        this._log(`${p.config.name}/${w.key}: window reset (${last.util}% → ${w.utilization}%), clearing samples`);
+                        h.samples.length = 0;
                     }
-                    h.prev = w.utilization;
+                    h.samples.push({ ts: now, util: w.utilization });
+                    const cutoff = now - RATE_WINDOW_MAX_MS;
+                    while (h.samples.length > 1 && h.samples[0].ts < cutoff)
+                        h.samples.shift();
                 }
+                this._saveHistory();
 
                 p.state.data = data;
                 this._computeMargins(p);
@@ -550,8 +595,8 @@ class UsageIndicator extends PanelMenu.Button {
         const now = Date.now();
         const windows = [];
         for (const w of d) {
-            const deltas = p.state.history[w.key]?.deltas ?? [];
-            const m = this._marginForWindow(w.utilization, w.resetsAt, deltas, now);
+            const samples = p.state.history[w.key]?.samples ?? [];
+            const m = this._marginForWindow(w.utilization, w.resetsAt, samples, now);
             windows.push({ key: w.key, label: w.label, ...m });
         }
 
@@ -567,44 +612,44 @@ class UsageIndicator extends PanelMenu.Button {
         p.state.margins = { windows, picked };
     }
 
-    _marginForWindow(utilization, resetsAt, deltas, now) {
-        // Prune deltas older than 7 days (hard cap)
-        const ageCutoff = now - MAX_DELTA_AGE_MS;
-        const before = deltas.length;
-        while (deltas.length > 0 && deltas[0].ts < ageCutoff)
-            deltas.shift();
-        if (before !== deltas.length)
-            this._log(`pruned ${before - deltas.length} expired deltas, ${deltas.length} remaining`);
-
+    _marginForWindow(utilization, resetsAt, samples, now) {
         const resetTime = new Date(resetsAt).getTime();
         const timeToReset = Math.max(0, resetTime - now);
         const remaining = 100 - utilization;
 
-        // Dynamic rate window: fraction of time-to-reset
-        const rateWindowMs = timeToReset * RATE_WINDOW_FRACTION;
-        const rateCutoff = now - rateWindowMs;
-        const rateDeltas = deltas.filter(d => d.ts >= rateCutoff);
+        // "If I keep the pace of the last few tens of minutes, where do I
+        // land at reset?" — the observation window shrinks as usage climbs
+        // so the estimate reacts faster the closer the limit gets
+        const frac = Math.min(100, Math.max(0, utilization)) / 100;
+        const rateWindowMs = RATE_WINDOW_MAX_MS - (RATE_WINDOW_MAX_MS - RATE_WINDOW_MIN_MS) * frac;
+        const cutoff = now - rateWindowMs;
+        const inWindow = samples.filter(s => s.ts >= cutoff);
 
-        const totalIncrease = rateDeltas.reduce((sum, d) => sum + d.increase, 0);
-        const rate = rateWindowMs > 0 ? totalIncrease / rateWindowMs : 0; // % per ms
-        const ratePerMin = rate * 60000;
-
-        this._log(`rate: ${ratePerMin.toFixed(4)}%/min (${rateDeltas.length}/${deltas.length} deltas in ${(rateWindowMs / 60000).toFixed(1)}min window, total +${totalIncrease.toFixed(2)}%) remaining=${remaining.toFixed(1)}% resetIn=${(timeToReset / 60000).toFixed(1)}min`);
-
-        let marginMs;
-        if (utilization >= 100) {
-            marginMs = -timeToReset;
-        } else if (rate <= 0) {
-            marginMs = timeToReset;
-        } else {
-            marginMs = (remaining / rate) - timeToReset;
+        let rate = null; // % per ms; null = not enough signal yet
+        if (inWindow.length >= 2) {
+            const first = inWindow[0];
+            const last = inWindow[inWindow.length - 1];
+            const span = last.ts - first.ts;
+            if (span >= RATE_MIN_SPAN_MS)
+                rate = Math.max(0, (last.util - first.util) / span);
         }
 
-        const projectedAtReset = rate > 0
-            ? Math.min(100, utilization + rate * timeToReset)
-            : utilization;
+        this._log(`rate: ${((rate ?? 0) * 60000).toFixed(4)}%/min (${inWindow.length} samples in ${(rateWindowMs / 60000).toFixed(0)}min window) remaining=${remaining.toFixed(1)}% resetIn=${(timeToReset / 60000).toFixed(1)}min`);
 
-        return { utilization, resetsAt, marginMs, projectedAtReset };
+        let marginMs, projectedAtReset;
+        if (utilization >= 100) {
+            marginMs = -timeToReset;
+            projectedAtReset = 100;
+        } else if (rate === null || rate <= 0) {
+            marginMs = timeToReset;
+            projectedAtReset = utilization;
+        } else {
+            marginMs = (remaining / rate) - timeToReset;
+            projectedAtReset = Math.min(100, utilization + rate * timeToReset);
+        }
+
+        // rate === 0 is a real measurement (idle), only null means "no signal yet"
+        return { utilization, resetsAt, marginMs, projectedAtReset, hasRate: rate !== null };
     }
 
     // --- Panel update ---
@@ -630,6 +675,8 @@ class UsageIndicator extends PanelMenu.Button {
         if (resetPassed) {
             panel.marginLabel.set_text('stale');
             panel.marginLabel.add_style_class_name('margin-over');
+        } else if (!picked.hasRate) {
+            panel.marginLabel.set_text('…');
         } else if (picked.marginMs > 0) {
             panel.marginLabel.set_text(`→${Math.round(picked.projectedAtReset)}%`);
         } else {
@@ -702,6 +749,8 @@ class UsageIndicator extends PanelMenu.Button {
         row.marginLabel.remove_style_class_name('menu-margin-over');
 
         if (!resetsAt) { row.marginLabel.set_text(''); return; }
+
+        if (!margin.hasRate) { row.marginLabel.set_text('measuring pace…'); return; }
 
         if (marginMs > 0) {
             row.marginLabel.set_text(`→${Math.round(margin.projectedAtReset)}% at reset`);
