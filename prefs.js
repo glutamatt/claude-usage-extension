@@ -82,5 +82,23 @@ export default class ClaudeUsagePreferences extends ExtensionPreferences {
             Gio.SettingsBindFlags.DEFAULT
         );
         displayGroup.add(showIconRow);
+
+        // Advanced
+        const advancedGroup = new Adw.PreferencesGroup({
+            title: 'Advanced',
+        });
+        page.add(advancedGroup);
+
+        const debugRow = new Adw.SwitchRow({
+            title: 'Debug Logging',
+            subtitle: 'Write verbose diagnostic logs to journald. Leave off for everyday use.',
+        });
+        settings.bind(
+            'debug',
+            debugRow,
+            'active',
+            Gio.SettingsBindFlags.DEFAULT
+        );
+        advancedGroup.add(debugRow);
     }
 }

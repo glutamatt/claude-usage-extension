@@ -17,7 +17,7 @@ const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_DELAYS = [5, 10, 20];
 const RATE_WINDOW_FRACTION = 0.15; // rate window = 15% of time-to-reset
 const MAX_DELTA_AGE_MS = 7 * 24 * 3600000; // prune deltas older than 7 days
-const TAG = '[ai-usage]'; // TODO: remove debug logs after beta
+const TAG = '[ai-usage]';
 
 function detectClaudeCodeVersion() {
     try {
@@ -154,6 +154,11 @@ class UsageIndicator extends PanelMenu.Button {
 
         this._refreshAll();
         this._startTimer();
+    }
+
+    _log(msg) {
+        if (this._settings.get_boolean('debug'))
+            console.log(`${TAG} ${msg}`);
     }
 
     // --- Provider init ---
@@ -363,7 +368,7 @@ class UsageIndicator extends PanelMenu.Button {
 
     _refreshProvider(p) {
         if (p._cooldownUntil && Date.now() < p._cooldownUntil) {
-            console.log(`${TAG} ${p.config.name}: skipping — cooldown for ${Math.round((p._cooldownUntil - Date.now()) / 1000)}s more`);
+            this._log(`${p.config.name}: skipping — cooldown for ${Math.round((p._cooldownUntil - Date.now()) / 1000)}s more`);
             return;
         }
         const path = p.config.credentialsPath();
@@ -404,33 +409,33 @@ class UsageIndicator extends PanelMenu.Button {
                 const bytes = session.send_and_read_finish(result);
 
                 if (msg.status_code === 401 || msg.status_code === 403) {
-                    console.log(`${TAG} ${p.config.name}: HTTP ${msg.status_code} — auth error`);
+                    this._log(`${p.config.name}: HTTP ${msg.status_code} — auth error`);
                     this._setError(p, '🚨');
                     return;
                 }
                 if (msg.status_code === 429) {
                     p._backoffCount = (p._backoffCount ?? 0) + 1;
                     const backoffSecs = Math.min(600, 60 * Math.pow(2, p._backoffCount - 1));
-                    console.log(`${TAG} ${p.config.name}: HTTP 429 — backing off ${backoffSecs}s (attempt ${p._backoffCount})`);
+                    this._log(`${p.config.name}: HTTP 429 — backing off ${backoffSecs}s (attempt ${p._backoffCount})`);
                     // Skip next N regular refreshes by setting a cooldown timestamp
                     p._cooldownUntil = Date.now() + backoffSecs * 1000;
                     return;
                 }
                 if (msg.status_code !== 200) {
-                    console.log(`${TAG} ${p.config.name}: HTTP ${msg.status_code} — retrying`);
+                    this._log(`${p.config.name}: HTTP ${msg.status_code} — retrying`);
                     this._retry(p, '⚠️');
                     return;
                 }
 
                 const raw = JSON.parse(new TextDecoder().decode(bytes.get_data()));
-                console.log(`${TAG} ${p.config.name}: raw response: ${JSON.stringify(raw)}`);
+                this._log(`${p.config.name}: raw response: ${JSON.stringify(raw)}`);
                 const data = p.config.parseResponse(raw);
                 if (!data) {
-                    console.log(`${TAG} ${p.config.name}: parseResponse returned null`);
+                    this._log(`${p.config.name}: parseResponse returned null`);
                     this._setError(p, '⚠️');
                     return;
                 }
-                console.log(`${TAG} ${p.config.name}: parsed windows: ${JSON.stringify(data)}`);
+                this._log(`${p.config.name}: parsed windows: ${JSON.stringify(data)}`);
 
                 p.state.retryAttempt = 0;
                 p.state.error = null;
@@ -447,7 +452,7 @@ class UsageIndicator extends PanelMenu.Button {
                         const increase = Math.max(0, w.utilization - h.prev);
                         if (increase > 0) {
                             h.deltas.push({ ts: now, increase });
-                            console.log(`${TAG} ${p.config.name}/${w.key}: delta +${increase.toFixed(2)}% (prev=${h.prev.toFixed(2)} new=${w.utilization.toFixed(2)})`);
+                            this._log(`${p.config.name}/${w.key}: delta +${increase.toFixed(2)}% (prev=${h.prev.toFixed(2)} new=${w.utilization.toFixed(2)})`);
                         }
                     }
                     h.prev = w.utilization;
@@ -510,14 +515,14 @@ class UsageIndicator extends PanelMenu.Button {
         }
 
         for (const w of windows)
-            console.log(`${TAG} ${p.config.name}/${w.key}: util=${w.utilization.toFixed(1)}% margin=${(w.marginMs / 60000).toFixed(1)}min`);
+            this._log(`${p.config.name}/${w.key}: util=${w.utilization.toFixed(1)}% margin=${(w.marginMs / 60000).toFixed(1)}min`);
 
         const willHit = windows.filter(m => m.marginMs < 0);
         const picked = willHit.length > 0
             ? willHit.reduce((a, b) => a.marginMs < b.marginMs ? a : b)
             : windows.reduce((a, b) => a.marginMs < b.marginMs ? a : b);
 
-        console.log(`${TAG} ${p.config.name}: picked=${picked.key} marginMs=${(picked.marginMs / 60000).toFixed(1)}min`);
+        this._log(`${p.config.name}: picked=${picked.key} marginMs=${(picked.marginMs / 60000).toFixed(1)}min`);
         p.state.margins = { windows, picked };
     }
 
@@ -528,7 +533,7 @@ class UsageIndicator extends PanelMenu.Button {
         while (deltas.length > 0 && deltas[0].ts < ageCutoff)
             deltas.shift();
         if (before !== deltas.length)
-            console.log(`${TAG} pruned ${before - deltas.length} expired deltas, ${deltas.length} remaining`);
+            this._log(`pruned ${before - deltas.length} expired deltas, ${deltas.length} remaining`);
 
         const resetTime = new Date(resetsAt).getTime();
         const timeToReset = Math.max(0, resetTime - now);
@@ -543,7 +548,7 @@ class UsageIndicator extends PanelMenu.Button {
         const rate = rateWindowMs > 0 ? totalIncrease / rateWindowMs : 0; // % per ms
         const ratePerMin = rate * 60000;
 
-        console.log(`${TAG} rate: ${ratePerMin.toFixed(4)}%/min (${rateDeltas.length}/${deltas.length} deltas in ${(rateWindowMs / 60000).toFixed(1)}min window, total +${totalIncrease.toFixed(2)}%) remaining=${remaining.toFixed(1)}% resetIn=${(timeToReset / 60000).toFixed(1)}min`);
+        this._log(`rate: ${ratePerMin.toFixed(4)}%/min (${rateDeltas.length}/${deltas.length} deltas in ${(rateWindowMs / 60000).toFixed(1)}min window, total +${totalIncrease.toFixed(2)}%) remaining=${remaining.toFixed(1)}% resetIn=${(timeToReset / 60000).toFixed(1)}min`);
 
         let marginMs;
         if (utilization >= 100) {

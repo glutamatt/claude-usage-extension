@@ -17,5 +17,10 @@
       <summary>Show icon</summary>
       <description>Whether to show the Claude icon in the top bar</description>
     </key>
+    <key name="debug" type="b">
+      <default>false</default>
+      <summary>Debug logging</summary>
+      <description>Write verbose diagnostic logs to journald. Leave off for everyday use.</description>
+    </key>
   </schema>
 </schemalist>
