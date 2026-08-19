@@ -123,7 +123,14 @@ class UsageIndicator extends PanelMenu.Button {
         this._destroyed = false;
         this._settings = settings;
         this._openPreferences = openPreferences;
-        this._session = new Soup.Session();
+        this._session = this._createSession();
+
+        // Refresh as soon as connectivity returns (e.g. extension enabled
+        // at session start before Wi-Fi is up)
+        this._netMonitor = Gio.NetworkMonitor.get_default();
+        this._netChangedId = this._netMonitor.connect('network-changed', (_m, available) => {
+            if (available) this._refreshAll();
+        });
 
         this._box = new St.BoxLayout({ style_class: 'panel-status-menu-box' });
 
@@ -159,6 +166,12 @@ class UsageIndicator extends PanelMenu.Button {
     _log(msg) {
         if (this._settings.get_boolean('debug'))
             console.log(`${TAG} ${msg}`);
+    }
+
+    _createSession() {
+        // Without a timeout, a connection opened while the network is down
+        // hangs forever and poisons every later request on the session
+        return new Soup.Session({ timeout: 15 });
     }
 
     // --- Provider init ---
@@ -367,6 +380,10 @@ class UsageIndicator extends PanelMenu.Button {
     // --- Generic provider fetch pipeline ---
 
     _refreshProvider(p) {
+        if (!this._netMonitor.network_available) {
+            this._log(`${p.config.name}: skipping — network unavailable`);
+            return;
+        }
         if (p._cooldownUntil && Date.now() < p._cooldownUntil) {
             this._log(`${p.config.name}: skipping — cooldown for ${Math.round((p._cooldownUntil - Date.now()) / 1000)}s more`);
             return;
@@ -464,6 +481,10 @@ class UsageIndicator extends PanelMenu.Button {
                 this._updateMenu(p);
             } catch (e) {
                 console.error(`${p.config.name}: fetch error:`, e.message);
+                // A stale pooled connection can fail every future request:
+                // drop the whole session and start clean on retry
+                this._session.abort();
+                this._session = this._createSession();
                 this._retry(p, '⚠️');
             }
         });
@@ -696,6 +717,7 @@ class UsageIndicator extends PanelMenu.Button {
     destroy() {
         this._destroyed = true;
         this._stopTimer();
+        if (this._netChangedId) { this._netMonitor.disconnect(this._netChangedId); this._netChangedId = null; }
         if (this._session) { this._session.abort(); this._session = null; }
         if (this._settingsChangedId) { this._settings.disconnect(this._settingsChangedId); this._settingsChangedId = null; }
         super.destroy();
