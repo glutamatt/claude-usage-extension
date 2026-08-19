@@ -64,6 +64,26 @@ function claudeConfig(extensionPath) {
         },
 
         parseResponse(data) {
+            // Modern shape: limits[] lists every window, including
+            // model-scoped weekly limits (e.g. Fable) that the legacy
+            // five_hour/seven_day fields don't carry
+            if (Array.isArray(data?.limits)) {
+                const windows = [];
+                for (const l of data.limits) {
+                    if (typeof l.percent !== 'number' || !l.resets_at) continue;
+                    const scoped = l.scope?.model?.display_name ?? l.scope?.surface ?? null;
+                    const label = l.group === 'session' ? '5-Hour'
+                        : scoped ? `7-Day ${scoped}` : '7-Day';
+                    windows.push({
+                        key: scoped ? `${l.kind}:${scoped}` : l.kind,
+                        label,
+                        utilization: l.percent,
+                        resetsAt: l.resets_at,
+                    });
+                }
+                if (windows.length > 0) return windows;
+            }
+            // Legacy fallback
             const windows = [];
             if (data?.five_hour && typeof data.five_hour.utilization === 'number')
                 windows.push({ key: 'five_hour', label: '5-Hour', utilization: data.five_hour.utilization, resetsAt: data.five_hour.resets_at });
