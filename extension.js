@@ -603,12 +603,16 @@ class UsageIndicator extends PanelMenu.Button {
         for (const w of windows)
             this._log(`${p.config.name}/${w.key}: util=${w.utilization.toFixed(1)}% margin=${(w.marginMs / 60000).toFixed(1)}min`);
 
+        // A window that will hit the limit wins, the one blocking longest
+        // first. Otherwise compare projected % at reset: margins in ms
+        // aren't comparable across a 5h and a 7-day window (an idle 5h
+        // window always has the smaller margin, hiding a 7-day at 73%)
         const willHit = windows.filter(m => m.marginMs < 0);
         const picked = willHit.length > 0
             ? willHit.reduce((a, b) => a.marginMs < b.marginMs ? a : b)
-            : windows.reduce((a, b) => a.marginMs < b.marginMs ? a : b);
+            : windows.reduce((a, b) => a.projectedAtReset >= b.projectedAtReset ? a : b);
 
-        this._log(`${p.config.name}: picked=${picked.key} marginMs=${(picked.marginMs / 60000).toFixed(1)}min`);
+        this._log(`${p.config.name}: picked=${picked.key} marginMs=${(picked.marginMs / 60000).toFixed(1)}min projected=${picked.projectedAtReset.toFixed(1)}%`);
         p.state.margins = { windows, picked };
     }
 
